@@ -2,90 +2,77 @@ import streamlit as st
 import FinanceDataReader as fdr
 import yfinance as yf
 import pandas as pd
-import time
+import requests
 
-# 제목 설정
-st.title("💰 글로벌 주식 & 코인 낙폭과대 스캐너")
-st.write("전 세계 주식과 코인을 분석하여 볼린저 밴드 하단을 돌파한 '단기 과매도' 종목을 찾습니다.")
+# 페이지 설정
+st.set_page_config(page_title="글로벌 자산 스캐너", layout="wide")
+st.title("💰 글로벌 주식 & 코인 매수신호 스캐너")
 
-# 분석 함수
-def analyze_stock(ticker, name, is_kr=True):
+# --- 사이드바 설정 ---
+st.sidebar.header("🔍 필터 설정")
+market = st.sidebar.selectbox("대상 시장", ["국내 코스피/코스닥", "미국 나스닥 100", "업비트 코인"])
+interval = st.sidebar.selectbox("타임프레임", ["1d", "4h", "1h"], index=0) # 타임프레임 부활!
+start_btn = st.sidebar.button("분석 시작")
+
+# --- 분석 함수 ---
+def analyze_asset(ticker, name, is_kr=False):
     try:
-        # 데이터 가져오기 (최근 100일치)
-        df = yf.download(ticker, period="100d", interval="1d", progress=False)
+        # 타임프레임에 따라 데이터 가져오기
+        period = "200d" if interval == "1d" else "10d"
+        df = yf.download(ticker, period=period, interval=interval, progress=False)
+        
         if len(df) < 30: return None
 
-        # 볼린저 밴드 계산 (20일 기준)
+        # 지표 계산
         ma20 = df['Close'].rolling(window=20).mean()
         std = df['Close'].rolling(window=20).std()
-        b_lower = ma20 - (std * 2) # 하단 밴드
+        df['lower_band'] = ma20 - (std * 2)
+        df['ema200'] = df['Close'].ewm(span=200, adjust=False).mean()
 
-        close = df['Close'].iloc[-1]
-        lower_band = b_lower.iloc[-1]
+        curr = df.iloc[-1]
+        close = float(curr['Close'])
+        lower = float(curr['lower_band'])
+        ema200 = float(curr['ema200'])
 
-        # 매수 신호 조건: 현재가가 볼린저 밴드 하단보다 낮을 때 (이평선 조건 삭제)
-        if close < lower_band:
+        # 매수 조건 (이평선 조건은 일단 제외하고 하단 돌파만 체크)
+        if close < lower:
+            # if close > ema200: # 나중에 이평선 조건 다시 쓰려면 이 줄의 #만 지우세요!
             return {
-                "종목명": name,
-                "티커": ticker,
-                "현재가": f"{float(close):,.0f}" if is_kr else f"{float(close):,.2f}",
-                "하단밴드": f"{float(lower_band):,.0f}" if is_kr else f"{float(lower_band):,.2f}",
-                "상태": "🔴 하단 돌파"
+                "종목명": name, "티커": ticker, 
+                "현재가": f"{close:,.0f}" if is_kr else f"{close:,.2f}",
+                "밴드하단": f"{lower:,.0f}" if is_kr else f"{lower:,.2f}",
+                "200일선": f"{ema200:,.0f}" if is_kr else f"{ema200:,.2f}"
             }
     except:
         return None
     return None
 
-# 사이드바 설정
-market = st.sidebar.selectbox("시장 선택", ["국내 코스피/코스닥", "미국 나스닥 100", "업비트 코인"])
-start_btn = st.sidebar.button("분석 시작")
-
+# --- 메인 로직 ---
 if start_btn:
     results = []
-    status_text = st.empty()
-    
-    if "코인" in market:
-        # 업비트 코인 리스트 (주요 코인)
-        coin_list = {
-            "KRW-BTC": "비트코인", "KRW-ETH": "이더리움", "KRW-XRP": "리플", 
-            "KRW-SOL": "솔라나", "KRW-ADA": "에이다", "KRW-DOGE": "도지코인"
-        }
-        for ticker, name in coin_list.items():
-            status_text.text(f"분석 중: {name}")
-            res = analyze_stock(f"{ticker.split('-')[1]}-USD", name, is_kr=False)
-            if res: results.append(res)
-            
-    else:
-        is_kr = "국내" in market
-        try:
-            if is_kr:
-                df_list = fdr.StockListing('KRX')
-                # 상위 500개 정도만 우선 분석 (속도와 에러 방지)
-                df_list = df_list.head(500)
-                for _, row in df_list.iterrows():
-                    name = row['Name']
-                    code = row['Code']
-                    ticker = code + (".KS" if row['Market'] == 'KOSPI' else ".KQ")
-                    status_text.text(f"분석 중: {name}")
-                    res = analyze_stock(ticker, name, is_kr=True)
-                    if res: results.append(res)
-            else:
-                # 나스닥 100 예시
-                tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA", "META"] # 예시 리스트
-                for ticker in tickers:
-                    status_text.text(f"분석 중: {ticker}")
-                    res = analyze_stock(ticker, ticker, is_kr=False)
-                    if res: results.append(res)
-        except:
-            st.error("데이터를 불러오는 중 오류가 발생했습니다.")
+    status = st.empty()
 
-    status_text.text("분석 완료!")
-    
+    if "코인" in market:
+        # 업비트 전체 원화 코인 리스트 가져오기
+        url = "https://api.upbit.com/v1/market/all"
+        coins = requests.get(url).json()
+        krw_coins = [c for c in coins if c['market'].startswith('KRW-')]
+        
+        for c in krw_coins:
+            status.text(f"코인 분석 중: {c['korean_name']}")
+            res = analyze_asset(f"{c['market'].split('-')[1]}-USD", c['korean_name'])
+            if res: results.append(res)
+
+    elif "국내" in market:
+        df_krx = fdr.StockListing('KRX').head(300) # 일단 상위 300개 테스트
+        for _, row in df_krx.iterrows():
+            status.text(f"국내주식 분석 중: {row['Name']}")
+            t = row['Code'] + (".KS" if row['Market'] == 'KOSPI' else ".KQ")
+            res = analyze_asset(t, row['Name'], is_kr=True)
+            if res: results.append(res)
+
+    status.text("✅ 분석 완료!")
     if results:
         st.table(pd.DataFrame(results))
-        # 엑셀 다운로드 기능
-        df_res = pd.DataFrame(results)
-        csv = df_res.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("📥 결과 다운로드 (CSV)", csv, "scanner_results.csv", "text/csv")
     else:
-        st.write("조건에 맞는 종목이 없습니다.")
+        st.info("조건에 맞는 종목이 없습니다. 타임프레임을 바꿔보세요!")
