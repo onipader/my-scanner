@@ -80,7 +80,8 @@ if start_button:
         status_text = st.empty()
         
         for i, t in enumerate(tickers): # 샘플로 100개만 먼저! 전체는 시간을 많이 잡아먹어
-            progress_bar.progress((i + 1) / 100)
+            # 전체 종목 수(len(tickers))에 맞춰서 진행률을 계산해!
+            progress_bar.progress((i + 1) / len(tickers))
             status_text.text(f"국내 종목 분석 중: {t}")
             try:
                 inter, per = yf_time_map[timeframe]
