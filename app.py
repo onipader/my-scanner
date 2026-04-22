@@ -21,12 +21,12 @@ if 'found_data' not in st.session_state:
 with st.sidebar:
     st.header("🔍 검색 설정")
     market = st.selectbox("대상 선택", ["국내주식 (KOSPI/KOSDAQ)", "미국주식 (NASDAQ/NYSE)", "업비트 코인 (원화마켓)"])
-    timeframe = st.selectbox("타임프레임", ["5분봉", "1시간봉", "일봉", "주봉", "월봉"]) # 급등주는 일봉 이상 분석이 정확해!
+    timeframe = st.selectbox("타임프레임", ["5분봉", "1시간봉","4시간봉", "일봉", "주봉", "월봉"]) # 급등주는 일봉 이상 분석이 정확해!
     vol_threshold = st.slider("거래량 폭증 기준 (배수)", 2.0, 10.0, 3.0)
     start_button = st.button("🚀 분석 시작", use_container_width=True)
 
 # yfinance용 시간 매핑
-yf_time_map = {"5분봉":("5m","1d"), "1시간봉":("60m","1w"), "일봉":("1d","1y"), "주봉":("1wk","2y"), "월봉":("1mo","5y")}
+yf_time_map = {"5분봉":("5m","1d"), "1시간봉":("60m","1w"),"4시간봉":("240m","4w"), "일봉":("1d","1y"), "주봉":("1wk","2y"), "월봉":("1mo","5y")}
 
 def check_signal_pro(data, vol_mult):
     """
