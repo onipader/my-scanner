@@ -26,7 +26,7 @@ with st.sidebar:
     start_button = st.button("🚀 분석 시작", use_container_width=True)
 
 # yfinance용 시간 매핑
-yf_time_map = {"일봉":("1d","1y"), "주봉":("1wk","2y"), "월봉":("1mo","5y")}
+timeframe = st.selectbox("타임프레임", ["5분봉", "1시간봉", "일봉", "주봉", "월봉"])
 
 def check_signal_pro(data, vol_mult):
     """
@@ -79,7 +79,7 @@ if start_button:
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        for i, t in enumerate(tickers[:100]): # 샘플로 100개만 먼저! 전체는 시간을 많이 잡아먹어
+        for i, t in enumerate(tickers): # 샘플로 100개만 먼저! 전체는 시간을 많이 잡아먹어
             progress_bar.progress((i + 1) / 100)
             status_text.text(f"국내 종목 분석 중: {t}")
             try:
