@@ -1,4 +1,5 @@
 streamlit
+FinanceDataReader
 yfinance
 pandas
 requests
