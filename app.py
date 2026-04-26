@@ -1,96 +1,80 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import time
 import requests
+import time
 from datetime import datetime
 
-# 1. 페이지 설정
-st.set_page_config(page_title="글로벌 자산 스캐너", layout="wide")
-st.title("💰 글로벌 주식 & 코인 매수신호 스캐너")
+# 1. 초기 설정
+st.set_page_config(page_title="코인/주식 스캐너", layout="wide")
+st.title("💰 실시간 매수 신호 스캐너")
 
 if 'found_data' not in st.session_state:
     st.session_state.found_data = []
 
-# 2. 사이드바 설정
+# 2. 사이드바 - 가장 단순하고 확실한 설정
 with st.sidebar:
     st.header("🔍 검색 설정")
-    market_choice = st.selectbox("대상 선택", ["국내주식 (KOSPI/KOSDAQ)", "업비트 코인 (원화마켓)"])
-    top_n = st.slider("스캔 범위 (상위 N개)", 10, 200, 100, 10)
-    tf_display = ["5분봉", "1시간봉", "4시간봉", "일봉", "주봉", "월봉"]
-    tf_choice = st.selectbox("타임프레임", tf_display)
-    start_button = st.button("🚀 분석 시작", use_container_width=True)
+    market = st.selectbox("대상 선택", ["업비트 코인 (전체)", "미국 대형주 (TOP 20)", "국내 대형주 (TOP 20)"])
+    timeframe = st.selectbox("타임프레임", ["일봉", "주봉", "월봉", "1시간봉", "5분봉"])
+    start_btn = st.button("🚀 분석 시작", use_container_width=True)
 
-# 3. 매핑 및 신호 함수
-yf_tf_map = {
-    "5분봉": ("5m", "1d"), "1시간봉": ("60m", "1w"), "4시간봉": ("90m", "1mo"), 
-    "일봉": ("1d", "1y"), "주봉": ("1wk", "2y"), "월봉": ("1mo", "5y")
-}
+# 3. 데이터 매핑
+yf_tf = {"5분봉": "5m", "1시간봉": "60m", "일봉": "1d", "주봉": "1wk", "월봉": "1mo"}
+yf_pd = {"5분봉": "1d", "1시간봉": "1w", "일봉": "1y", "주봉": "2y", "월봉": "5y"}
 
 def check_signal(df):
+    """기본 볼린저 밴드 하단 돌파 로직"""
     if df is None or len(df) < 20: return None
-    try:
-        close = df['Close'].iloc[:, 0] if isinstance(df['Close'], pd.DataFrame) else df['Close']
-    except: close = df['Close']
+    close = df['Close'].iloc[:, 0] if isinstance(df['Close'], pd.DataFrame) else df['Close']
     
     ma20 = close.rolling(window=20).mean()
     std = close.rolling(window=20).std()
     lower_band = ma20 - (std * 2)
-    curr = close.iloc[-1]
     
-    # 🔹 신호 민감도 업: 하단선 2% 이내면 포착
-    if curr <= lower_band.iloc[-1] * 1.02:
+    curr = close.iloc[-1]
+    if curr <= lower_band.iloc[-1] * 1.01: # 하단선 1% 이내
         return curr
     return None
 
-# 4. 분석 실행
-if start_button:
+# 4. 분석 시작
+if start_btn:
     st.session_state.found_data = []
-    status_area = st.empty()
-    progress_bar = st.progress(0)
-    results_container = st.container()
-
-    if "국내" in market_choice:
-        # 404 에러 방지를 위해 실제 상장된 상위 종목 리스트 직접 정의
-        krx_list = [
-            ("005930.KS", "삼성전자"), ("000660.KS", "SK하이닉스"), ("373220.KS", "LG에너지솔루션"),
-            ("207940.KS", "삼성바이오로직스"), ("005380.KS", "현대차"), ("068270.KS", "셀트리온"),
-            ("000270.KS", "기아"), ("005490.KS", "POSCO홀딩스"), ("035420.KS", "NAVER"),
-            ("006400.KS", "삼성SDI"), ("051910.KS", "LG화학"), ("035720.KS", "카카오"),
-            ("012330.KS", "현대모비스"), ("105560.KS", "KB금융"), ("055550.KS", "신한지주"),
-            ("066570.KS", "LG전자"), ("003670.KS", "포스코푸처엠"), ("096770.KS", "SK이노베이션"),
-            ("032830.KS", "삼성생명"), ("000810.KS", "삼성화재"), ("086790.KS", "하나금융지주"),
-            ("015760.KS", "한국전력"), ("033780.KS", "KT&G"), ("009150.KS", "삼성전기"),
-            ("034730.KS", "SK"), ("329180.KS", "HD현대중공업"), ("010130.KS", "고려아연"),
-            ("000100.KS", "유한양행"), ("009830.KS", "한화솔루션"), ("259960.KS", "크래프톤")
-        ] # (필요시 더 추가 가능)
-        target_list = krx_list[:top_n]
+    status = st.empty()
+    prog = st.progress(0)
+    
+    # 종목 리스트 구성
+    if "업비트" in market:
+        res = requests.get("https://api.upbit.com/v1/market/all").json()
+        tickers = [m['market'].replace("KRW-", "") + "-KRW" for m in res if m['market'].startswith("KRW-")]
+        names = [m['korean_name'] for m in res if m['market'].startswith("KRW-")]
+    elif "미국" in market:
+        tickers = ["AAPL", "MSFT", "NVDA", "TSLA", "GOOGL", "AMZN", "META", "BRK-B", "UNH", "V", "JPM", "JNJ", "WMT", "MA", "PG", "AVGO", "HD", "ORCL", "COST", "CVX"]
+        names = tickers
     else:
-        upbit_res = requests.get("https://api.upbit.com/v1/market/all").json()
-        target_list = [[m['market'], m['korean_name']] for m in upbit_res if m['market'].startswith('KRW-')][:top_n]
+        tickers = ["005930.KS", "000660.KS", "373220.KS", "207940.KS", "005380.KS", "068270.KS", "000270.KS", "005490.KS", "035420.KS", "006400.KS", "051910.KS", "035720.KS", "012330.KS", "105560.KS", "055550.KS", "066570.KS", "000810.KS", "032830.KS", "086790.KS", "015760.KS"]
+        names = ["삼성전자", "SK하이닉스", "LG엔솔", "삼바", "현대차", "셀트리온", "기아", "POSCO홀딩스", "네이버", "삼성SDI", "LG화학", "카카오", "현대모비스", "KB금융", "신한지주", "LG전자", "삼성화재", "삼성생명", "하나금융", "한국전력"]
 
-    for i, (ticker, name) in enumerate(target_list):
-        progress_bar.progress((i + 1) / len(target_list))
-        status_area.markdown(f"🔍 **분석 중:** `{name}` ({i+1}/{len(target_list)})")
+    # 루프
+    for i, t in enumerate(tickers):
+        prog.progress((i + 1) / len(tickers))
+        status.markdown(f"🔍 **분석 중:** `{names[i]}`")
         
         try:
-            itv, per = yf_tf_map[tf_choice]
-            search_ticker = ticker.replace("KRW-", "") + "-KRW" if "업비트" in market_choice else ticker
-            data = yf.download(search_ticker, interval=itv, period=per, progress=False, show_errors=False)
+            data = yf.download(t, interval=yf_tf[timeframe], period=yf_pd[timeframe], progress=False)
+            if data.empty: continue
             
-            if not data.empty:
-                price = check_signal(data)
-                if price:
-                    with results_container:
-                        st.success(f"✅ **{name}** 신호 포착!")
-                    st.session_state.found_data.append({"시간": datetime.now().strftime('%H:%M'), "종목": name, "코드": ticker, "현재가": f"{price:,.0f}"})
+            price = check_signal(data)
+            if price:
+                st.success(f"✅ **{names[i]}** 신호 포착!")
+                st.session_state.found_data.append({"시간": datetime.now().strftime('%H:%M'), "종목": names[i], "코드": t, "현재가": f"{price:,.0f}"})
             time.sleep(0.1)
         except: continue
 
-    status_area.info(f"✅ 분석 완료! (대상: {len(target_list)}개)")
+    status.info("✅ 분석 완료!")
 
-# 5. 결과 테이블
+# 5. 결과 표시
 if st.session_state.found_data:
     st.table(pd.DataFrame(st.session_state.found_data))
-elif start_button:
-    st.warning("조건에 맞는 종목이 없습니다. 타임프레임을 일봉/1시간봉으로 바꿔보세요.")
+elif start_btn:
+    st.warning("현재 신호가 잡힌 종목이 없습니다.")
