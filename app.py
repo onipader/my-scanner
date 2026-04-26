@@ -9,16 +9,20 @@ with st.sidebar:
     st.header("⚙️ 필터 설정")
     market = st.selectbox("시장", ["업비트 코인", "국내주식", "미국주식"])
     tf_choice = st.selectbox("타임프레임", ["월봉", "주봉", "일봉", "4시간봉"])
+    
+    # 🔹 추가된 기능: 시가총액 순위 범위 설정
+    top_n = st.slider("시가총액 상위 몇 위까지 스캔할까요?", 50, 500, 100, step=50)
+    
     tf_map = {"월봉": "1M", "주봉": "1W", "일봉": "", "4시간봉": "240"}
-    st.info("차트의 '종합 지표'가 매수(Buy)인 우량주만 찾아냅니다.")
+    st.info(f"시가총액 상위 {top_n}개 종목 중 '매수' 신호가 뜬 종목을 찾습니다.")
+    
     start_btn = st.button("🚀 신호 동기화 스캔 시작", use_container_width=True)
 
-def get_clean_data(m_name, itv):
+def get_synced_data(m_name, itv, limit):
     url_map = {"업비트 코인": "crypto", "국내주식": "korea", "미국주식": "america"}
     api_url = f"https://scanner.tradingview.com/{url_map[m_name]}/scan"
     
     cols = ["Recommend.All", "close", "BB.lower", "description", "name"]
-    # 타임프레임 적용
     actual_cols = [f"{c}|{itv}" if itv and c not in ["description", "name"] else c for c in cols]
 
     payload = {
@@ -26,8 +30,9 @@ def get_clean_data(m_name, itv):
         "markets": [url_map[m_name]],
         "columns": actual_cols,
         "sort": {"column": "market_cap_basic", "direction": "desc"},
-        "range": [0, 100]
+        "range": [0, limit] # 🔹 설정한 개수만큼 가져옵니다
     }
+    
     if m_name == "업비트 코인":
         payload["filter"].append({"left": "name", "operation": "match", "right": "KRW"})
 
@@ -37,16 +42,16 @@ def get_clean_data(m_name, itv):
     except: return []
 
 if start_btn:
-    raw = get_clean_data(market, interval := tf_map[tf_choice])
+    # 🔹 선택한 top_n 값을 함수에 전달
+    raw = get_synced_data(market, interval := tf_map[tf_choice], top_n)
     results = []
+    
     for item in raw:
         d = item['d']
-        # 🔹 [에러 방지] 데이터가 하나라도 비어있으면 건너뜁니다
         if None in d[:3]: continue
         
         score = d[0]
-        # 점수에 따른 신호 분류
-        if score > 0.1: # Buy 이상만 포착
+        if score > 0.1: # Buy 신호 이상
             results.append({
                 "종목명": d[3] if d[3] else d[4],
                 "신호": "Strong Buy" if score > 0.5 else "Buy",
@@ -56,6 +61,6 @@ if start_btn:
 
     if results:
         st.table(pd.DataFrame(results))
-        st.success(f"차트 신호와 일치하는 {len(results)}개 종목 포착!")
+        st.success(f"상위 {top_n}개 중 {len(results)}개 종목 포착!")
     else:
-        st.warning("현재 'BUY' 신호가 뜬 우량 종목이 없습니다.")
+        st.warning(f"상위 {top_n}개 중 현재 'BUY' 신호가 뜬 종목이 없습니다.")
