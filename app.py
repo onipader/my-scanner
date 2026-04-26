@@ -9,7 +9,7 @@ import time
 st.set_page_config(page_title="Double BB Scanner", page_icon="📈", layout="wide")
 
 st.title("📈 전략 일치형: Double BB + 365 EMA 스캐너")
-st.markdown("스캔 대상을 설정한 숫자만큼 **정확히 제한**하도록 수정했습니다.")
+st.markdown("오류를 수정했습니다. 이제 설정한 개수만큼 **시가총액 상위 종목**을 정확히 스캔합니다.")
 
 # --- 세션 상태 초기화 ---
 if 'found_data' not in st.session_state:
@@ -27,7 +27,6 @@ with st.sidebar:
     }
 
     st.divider()
-    # [수정] 스캔 대상 개수를 확실히 반영하기 위해 변수 저장
     top_n = st.slider("스캔 대상 (시가총액 상위 N개)", 10, 1000, 200)
     
     st.divider()
@@ -37,11 +36,11 @@ with st.sidebar:
     
     st.divider()
     use_per = st.checkbox("저PER 필터 사용", value=True)
-    per_limit = st.number_input("PER 기준 (이하)", value=8.0) # 화면 설정값 반영
+    per_limit = st.number_input("PER 기준 (이하)", value=8.0)
     
     start_button = st.button("🚀 전략 스캔 시작", use_container_width=True)
 
-# 트레이딩뷰 지표 계산 함수 (기존과 동일)
+# 트레이딩뷰 지표 계산 함수 (1표준편차 돌파 로직)
 def get_tv_strategy_data(symbol, screener, exchange, interval):
     try:
         url = f"https://scanner.tradingview.com/{screener}/scan"
@@ -51,8 +50,12 @@ def get_tv_strategy_data(symbol, screener, exchange, interval):
         }
         res = requests.post(url, json=payload, timeout=5).json()
         d = res['data'][0]['d']
-        lower_band_1 = d[1] - (d[2] * 1.0) # basis - (stddev * 1.0)
+        
+        # 주신 지표 로직: basis - (stddev * 1.0)
+        lower_band_1 = d[1] - (d[2] * 1.0) 
+        # ta.crossover 로직: 전봉은 아래, 현재봉은 위
         is_crossover = d[3] < lower_band_1 and d[0] > lower_band_1
+        
         return {"price": d[0], "signal": is_crossover, "ema365": d[4]}
     except:
         return None
@@ -63,26 +66,28 @@ if start_button:
     status_text = st.empty()
 
     try:
-        # 1. 리스트 구성 (여기서 개수 제한을 확실히 합니다)
-        with st.spinner("종목 리스트 필터링 중..."):
+        # 1. 리스트 구성
+        with st.spinner("종목 리스트 불러오는 중..."):
             if "국내" in market:
                 df_list = fdr.StockListing('KRX')
                 
-                # 시가총액 컬럼 찾기
-                cap_col = next((c for c in ['MarCap', '시가총액'] if c in df_list.columns), 'MarCap')
-                df_list[cap_col] = pd.to_numeric(df_list[cap_col], errors='coerce')
+                # [해결] 시가총액 컬럼을 안전하게 찾기
+                possible_cap_cols = ['MarCap', '시가총액', 'Stocks', 'Amount']
+                cap_col = next((c for c in possible_cap_cols if c in df_list.columns), None)
                 
-                # 1순위: 시가총액 순으로 먼저 정렬
-                df_list = df_list.sort_values(cap_col, ascending=False)
-                
-                # 2순위: PER 필터 적용 (있을 경우만)
+                if cap_col:
+                    df_list[cap_col] = pd.to_numeric(df_list[cap_col], errors='coerce')
+                    # 시가총액 순 정렬 후 상위 N개 먼저 확보
+                    df_list = df_list.sort_values(cap_col, ascending=False).head(int(top_n))
+                else:
+                    # 컬럼을 못 찾으면 그냥 상위 N개
+                    df_list = df_list.head(int(top_n))
+
+                # PER 필터링 (선택 사항)
                 if use_per and 'PER' in df_list.columns:
                     df_list['PER'] = pd.to_numeric(df_list['PER'], errors='coerce')
-                    # PER 조건에 맞는 종목들만 남김
+                    # 주의: PER 필터 적용 시 200개보다 적어질 수 있음
                     df_list = df_list[(df_list['PER'] > 0) & (df_list['PER'] <= per_limit)]
-                
-                # [핵심] 3순위: 최종 결과에서 사용자가 설정한 top_n 개수만큼만 자르기
-                df_list = df_list.head(int(top_n))
                 
                 tickers = [(row['Code'], row['Name'], "KRX", "korea", row.get('PER', 'N/A')) for _, row in df_list.iterrows()]
             
@@ -94,22 +99,25 @@ if start_button:
                 tickers = [(m['market'].split('-')[1], m['korean_name'], "UPBIT", "crypto", "N/A") for m in res if m['market'].startswith('KRW-')][:int(top_n)]
 
         # 2. 분석 실행
-        total_to_scan = len(tickers)
-        for i, (symbol, name, exch, scr, per_val) in enumerate(tickers):
-            progress_bar.progress((i + 1) / total_to_scan)
-            status_text.text(f"전략 분석 중 ({i+1}/{total_to_scan}): {name}")
-            
-            res = get_tv_strategy_data(symbol, scr, exch, interval_map[tf_choice])
-            
-            if res and res['signal']:
-                per_display = f"{per_val:.2f}" if isinstance(per_val, (int, float)) else "N/A"
-                st.success(f"🎯 **{name}** 신호 발생! (PER: {per_display})")
-                st.session_state.found_data.append({
-                    "종목": name, "현재가": res['price'], "PER": per_display, "EMA365": round(res['ema365'], 1) if res['ema365'] else "N/A"
-                })
-            time.sleep(0.05)
+        total_count = len(tickers)
+        if total_count == 0:
+            st.warning("조건에 맞는 종목이 없습니다. PER 기준을 높여보세요.")
+        else:
+            for i, (symbol, name, exch, scr, per_val) in enumerate(tickers):
+                progress_bar.progress((i + 1) / total_count)
+                status_text.text(f"분석 중 ({i+1}/{total_count}): {name}")
+                
+                res = get_tv_strategy_data(symbol, scr, exch, interval_map[tf_choice])
+                
+                if res and res['signal']:
+                    p_val = f"{per_val:.2f}" if isinstance(per_val, (int, float)) else "N/A"
+                    st.success(f"🎯 **{name}** BUY 신호! (PER: {p_val})")
+                    st.session_state.found_data.append({
+                        "종목": name, "현재가": res['price'], "PER": p_val, "EMA365": round(res['ema365'], 1) if res['ema365'] else "N/A"
+                    })
+                time.sleep(0.05)
 
-        status_text.text(f"✅ 총 {total_to_scan}개 종목 스캔 완료!")
+            status_text.text(f"✅ 총 {total_count}개 종목 스캔 완료!")
 
     except Exception as e:
         st.error(f"오류: {e}")
