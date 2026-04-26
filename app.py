@@ -1,144 +1,152 @@
 import streamlit as st
+import FinanceDataReader as fdr
 import pandas as pd
 import requests
-import FinanceDataReader as fdr
-import yfinance as yf
+from datetime import datetime
+import time
 
-st.set_page_config(layout="wide")
-st.title("📈 Double BB Scanner (완전 통합버전)")
+# 페이지 설정
+st.set_page_config(page_title="Double BB Scanner", page_icon="📈", layout="wide")
 
-# ---------------- 설정 ----------------
-market = st.selectbox("시장", ["코인", "국내주식", "미국주식"])
+st.title("📈 전략 일치형: Double BB + 365 EMA 스캐너")
+st.markdown("차트에 떠 있는 **과거의 BUY 신호**까지 모두 추적하여 리스트업합니다.")
 
-tf = st.selectbox("타임프레임", [
-    "5분봉", "1시간봉", "4시간봉",
-    "일봉", "주봉", "월봉"
-])
+# --- 세션 상태 초기화 ---
+if 'found_data' not in st.session_state:
+    st.session_state.found_data = []
 
-limit = st.slider("스캔 개수", 10, 100, 30)
-start = st.button("🚀 시작")
-
-# ---------------- 리샘플 ----------------
-def resample(df, tf):
-    df.index = pd.to_datetime(df.index)
-
-    if tf == "일봉":
-        return df
-
-    rule_map = {
-        "주봉": "W",
-        "월봉": "M",
-        "1시간봉": "1H",
-        "4시간봉": "4H"
+# 사이드바 설정
+with st.sidebar:
+    st.header("🔍 전략 설정")
+    market = st.selectbox("대상 선택", ["업비트 코인", "국내주식 (KRX)", "미국주식 (NASDAQ/NYSE)"])
+    tf_choice = st.selectbox("타임프레임", ["월봉", "주봉", "일봉", "4시간봉", "1시간봉", "5분봉"])
+    
+    interval_map = {
+        "5분봉": "5", "1시간봉": "60", "4시간봉": "240",
+        "일봉": "", "주봉": "1W", "월봉": "1M"
     }
 
-    if tf in rule_map:
-        return df.resample(rule_map[tf]).last().dropna()
+    st.divider()
+    top_n = st.slider("스캔 대상 (상위 N개)", 10, 1000, 250)
+    
+    st.divider()
+    st.subheader("⚙️ 파라미터 (Double BB)")
+    std_dev_1 = st.number_input("Standard Deviation 1", value=1.00, step=0.1)
+    std_dev_2 = st.number_input("Standard Deviation 2", value=2.00, step=0.1)
+    
+    st.divider()
+    use_per = st.checkbox("저PER 필터 사용 (국내 전용)", value=False)
+    per_limit = st.number_input("PER 기준 (이하)", value=15.0)
+    
+    start_button = st.button("🚀 차트 신호 추적 스캔 시작", use_container_width=True)
 
-    return df
+# 트레이딩뷰 과거 이력 추적 함수 (가장 중요)
+def get_tv_history_signal(symbol, screener, exchange, interval):
+    try:
+        url = f"https://scanner.tradingview.com/{screener}/scan"
+        # 현재부터 과거 12개 봉(월봉 기준 1년)의 종가와 BB 데이터를 요청
+        columns = ["close", "sma[20]", "StdDev.20", "EMA365"]
+        for i in range(1, 13):
+            columns.extend([f"close[{i}]", f"sma[20][{i}]", f"StdDev.20[{i}]"])
+            
+        payload = {
+            "symbols": {"tickers": [f"{exchange}:{symbol}"], "query": {"types": []}},
+            "columns": columns
+        }
+        res = requests.post(url, json=payload, timeout=10).json()
+        if 'data' not in res or not res['data']: return None
+        
+        d = res['data'][0]['d']
+        
+        # 최근 12개 봉 중 '교차(Crossover)'가 발생한 지점이 있는지 확인
+        # 차트의 BUY 신호는 한 번 발생하면 다음 신호 전까지 유지되는 경우가 많음
+        found_signal = False
+        signal_idx = -1
+        
+        for i in range(12):
+            # i번째 봉 데이터 (i=0이 현재)
+            c = d[i*3]     # close
+            ma = d[i*3+1]  # sma[20]
+            sd = d[i*3+2]  # stddev
+            
+            # i+1번째 봉 데이터 (이전 봉)
+            prev_c = d[(i+1)*3]
+            
+            if None in [c, ma, sd, prev_c]: continue
+            
+            l1 = ma - (sd * std_dev_1)
+            
+            # 골든크로스 조건: 이전 봉은 하단선 아래, 현재 봉은 하단선 위
+            if prev_c <= l1 and c > l1:
+                found_signal = True
+                signal_idx = i
+                break
+            
+            # 혹은 현재가가 여전히 매수 구간(하단선 1.0 아래)에 머물러 있는 경우
+            if i == 0 and c <= l1:
+                found_signal = True
+                signal_idx = 0
+                break
 
-# ---------------- BB 계산 ----------------
-def check(df):
-    if len(df) < 25:
-        return False
+        if found_signal:
+            return {
+                "price": d[0],
+                "ema365": d[39], # EMA365는 리스트 마지막 즈음에 위치
+                "idx": signal_idx
+            }
+        return None
+    except:
+        return None
 
-    df["sma"] = df["close"].rolling(20).mean()
-    df["std"] = df["close"].rolling(20).std()
-    df["lower"] = df["sma"] - df["std"]
+if start_button:
+    st.session_state.found_data = []
+    progress_bar = st.progress(0)
+    status_text = st.empty()
 
-    prev = df.iloc[-2]
-    now = df.iloc[-1]
+    try:
+        # 1. 리스트 구성
+        if "국내" in market:
+            df_list = fdr.StockListing('KRX')
+            if use_per:
+                df_list['PER'] = pd.to_numeric(df_list.get('PER'), errors='coerce')
+                df_list = df_list[(df_list['PER'] > 0) & (df_list['PER'] <= per_limit)]
+            tickers = [(row['Code'], row['Name'], "KRX", "korea") for _, row in df_list.head(top_n).iterrows()]
+        elif "미국" in market:
+            df_list = fdr.StockListing('NASDAQ').head(top_n)
+            tickers = [(row['Symbol'], row['Symbol'], "NASDAQ", "america") for _, row in df_list.iterrows()]
+        else: # 코인 (BTC 최우선)
+            res = requests.get("https://api.upbit.com/v1/market/all").json()
+            raw_tickers = [m for m in res if m['market'].startswith('KRW-')]
+            tickers = [("BTC", "비트코인", "UPBIT", "crypto")]
+            for m in raw_tickers:
+                sym = m['market'].split('-')[1]
+                if sym != "BTC": tickers.append((sym, m['korean_name'], "UPBIT", "crypto"))
+            tickers = tickers[:top_n]
 
-    return prev["close"] <= prev["lower"] and now["close"] > now["lower"]
+        # 2. 분석 실행
+        total = len(tickers)
+        for i, (symbol, name, exch, scr) in enumerate(tickers):
+            progress_bar.progress((i + 1) / total)
+            status_text.text(f"과거 신호 이력 추적 중: {name}")
+            
+            res = get_tv_history_signal(symbol, scr, exch, interval_map[tf_choice])
+            
+            if res:
+                msg = "현재 봉 신호" if res['idx'] == 0 else f"{res['idx']}개월 전 신호 발생"
+                st.success(f"🎯 **{name}({symbol})** 포착! ({msg})")
+                st.session_state.found_data.append({
+                    "종목": name, "가격": res['price'], "신호시점": msg, "365EMA": round(res['ema365'], 1) if res['ema365'] else "N/A"
+                })
+            time.sleep(0.01)
 
-# ---------------- 업비트 데이터 ----------------
-def get_upbit(market_code):
-    if tf == "5분봉":
-        url = "https://api.upbit.com/v1/candles/minutes/5"
-    elif tf == "1시간봉":
-        url = "https://api.upbit.com/v1/candles/minutes/60"
-    elif tf == "4시간봉":
-        url = "https://api.upbit.com/v1/candles/minutes/240"
-    else:
-        url = "https://api.upbit.com/v1/candles/days"
+        status_text.text(f"✅ 스캔 완료! (총 {len(st.session_state.found_data)}건 발견)")
 
-    res = requests.get(url, params={"market": market_code, "count": 200}).json()
-    df = pd.DataFrame(res)
+    except Exception as e:
+        st.error(f"오류: {e}")
 
-    df["close"] = df["trade_price"]
-    df = df[::-1]
-    df.index = pd.to_datetime(df["candle_date_time_kst"])
-
-    if tf in ["주봉", "월봉"]:
-        df = resample(df, tf)
-
-    return df
-
-# ---------------- 국내주식 ----------------
-def get_krx(code):
-    df = fdr.DataReader(code)
-    df = df.rename(columns={"Close": "close"})
-    return resample(df, tf)
-
-# ---------------- 미국주식 ----------------
-def get_us(symbol):
-    df = yf.download(symbol, period="2y", interval="1d", progress=False)
-    df = df.rename(columns={"Close": "close"})
-    return resample(df, tf)
-
-# ---------------- 실행 ----------------
-if start:
-    found = []
-
-    progress = st.progress(0)
-
-    if market == "코인":
-        markets = requests.get("https://api.upbit.com/v1/market/all").json()
-        tickers = [m["market"] for m in markets if m["market"].startswith("KRW-")][:limit]
-
-        for i, t in enumerate(tickers):
-            progress.progress((i+1)/len(tickers))
-
-            try:
-                df = get_upbit(t)
-
-                if check(df):
-                    st.success(f"🎯 {t} BUY")
-                    found.append(t)
-            except:
-                pass
-
-    elif market == "국내주식":
-        listing = fdr.StockListing("KRX").head(limit)
-
-        for i, row in listing.iterrows():
-            progress.progress((i+1)/limit)
-
-            try:
-                df = get_krx(row["Code"])
-
-                if check(df):
-                    st.success(f"🎯 {row['Name']} BUY")
-                    found.append(row["Name"])
-            except:
-                pass
-
-    else:
-        listing = fdr.StockListing("NASDAQ").head(limit)
-
-        for i, row in listing.iterrows():
-            progress.progress((i+1)/limit)
-
-            try:
-                df = get_us(row["Symbol"])
-
-                if check(df):
-                    st.success(f"🎯 {row['Symbol']} BUY")
-                    found.append(row["Symbol"])
-            except:
-                pass
-
-    st.write("총 발견:", len(found))
-
-    if len(found) == 0:
-        st.warning("현재 조건에서 BUY 없음")
+if st.session_state.found_data:
+    st.divider()
+    st.dataframe(pd.DataFrame(st.session_state.found_data), use_container_width=True)
+else:
+    if start_button:
+        st.warning("과거 1년치 이력에서도 신호를 찾지 못했습니다. 파라미터 설정을 다시 확인해 주세요.")
