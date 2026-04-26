@@ -1,4 +1,6 @@
-finance-datareader
+streamlit
+FinanceDataReader
+yfinance
 pandas
-tradingview-ta
 requests
+openpyxl
