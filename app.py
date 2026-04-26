@@ -5,8 +5,12 @@ import requests
 import time
 
 st.set_page_config(page_title="Double BB Scanner", page_icon="📈", layout="wide")
-st.title("📈 사용자 전략 동기화: Double BB 전용 스캐너")
-st.markdown("로직: **StdDev 2.0 하단 터치 후 1.0 하단 상향 돌파** 종목 포착")
+st.title("📈 사용자 전략 동기화: Double BB '상태 유지' 스캐너")
+st.markdown("""
+**포착 조건:**
+1. 현재 캔들의 **저가(Low)**가 2번 하단선을 터치했거나 그 근처였음
+2. 현재 캔들의 **종가(Close)**가 1번 하단선보다 **위에 있음** (돌파 유지)
+""")
 
 # 사이드바 설정
 with st.sidebar:
@@ -23,44 +27,39 @@ with st.sidebar:
     sd1 = st.number_input("Standard Deviation 1", value=1.0)
     sd2 = st.number_input("Standard Deviation 2", value=2.0)
     
-    start_button = st.button("🚀 내 전략으로 스캔 시작", use_container_width=True)
+    start_button = st.button("🚀 실시간 신호 추적 시작", use_container_width=True)
 
-def get_custom_strategy_signal(symbol, screener, exchange, interval):
+def get_state_signal(symbol, screener, exchange, interval):
     try:
         url = f"https://scanner.tradingview.com/{screener}/scan"
-        # 현재 봉(0)과 직전 봉(1)의 데이터를 모두 가져와서 흐름을 분석
+        # 현재 캔들의 실시간 데이터를 가져옴
         payload = {
             "symbols": {"tickers": [f"{exchange}:{symbol}"], "query": {"types": []}},
-            "columns": [
-                "close", "low", "sma[20]", "StdDev.20", "open",
-                "close[1]", "low[1]", "sma[20][1]", "StdDev.20[1]"
-            ]
+            "columns": ["close", "low", "sma[20]", "StdDev.20"]
         }
         res = requests.post(url, json=payload, timeout=7).json()
         if 'data' not in res or not res['data']: return None
         
         d = res['data'][0]['d']
-        # 현재 데이터
-        curr_c, curr_l, curr_ma, curr_sd, curr_o = d[0], d[1], d[2], d[3], d[4]
-        # 직전 데이터
-        prev_c, prev_l, prev_ma, prev_sd = d[5], d[6], d[7], d[8]
+        curr_c, curr_l, curr_ma, curr_sd = d[0], d[1], d[2], d[3]
 
-        # 밴드 계산
-        curr_l1 = curr_ma - (curr_sd * sd1)
-        curr_l2 = curr_ma - (curr_sd * sd2)
-        prev_l1 = prev_ma - (prev_sd * sd1)
-        prev_l2 = prev_ma - (prev_sd * sd2)
+        if None in [curr_c, curr_l, curr_ma, curr_sd]: return None
 
-        # --- 사용자 로직 구현 ---
-        # 조건 1: (현재 혹은 직전 봉에서) 2.0 하단을 터치했거나 그 근처였음
-        was_touching_l2 = (curr_l <= curr_l2 * 1.005) or (prev_l <= prev_l2 * 1.005)
+        # 밴드 값 계산
+        l1 = curr_ma - (curr_sd * sd1)
+        l2 = curr_ma - (curr_sd * sd2)
+
+        # --- 사용자님의 '상태 유지' 로직 ---
+        # 1. 이번 봉에서 2번 하단을 터치했었는가? (저가 기준)
+        #    * 약간의 오차를 감안해 0.5% 범위를 둡니다.
+        has_touched_l2 = curr_l <= l2 * 1.005 
         
-        # 조건 2: 1.0 하단을 상향 돌파 (현재 종가가 1.0 하단 위, 시가나 직전 종가는 아래)
-        is_crossing_l1 = (curr_c > curr_l1) and (prev_c <= prev_l1 or curr_o <= curr_l1)
+        # 2. 현재 종가가 1번 하단 위에 있는가?
+        is_above_l1 = curr_c > l1
 
-        # 두 조건이 이번 캔들 범위 안에서 만족되면 BUY
-        if was_touching_l2 and is_crossing_l1:
-            return {"price": curr_c, "l1": curr_l1, "l2": curr_l2}
+        # 두 조건이 모두 참이면 'BUY' 상태 유지
+        if has_touched_l2 and is_above_l1:
+            return {"price": curr_c, "l1": l1, "l2": l2}
         return None
     except:
         return None
@@ -68,6 +67,7 @@ def get_custom_strategy_signal(symbol, screener, exchange, interval):
 if start_button:
     found_list = []
     progress_bar = st.progress(0)
+    status_text = st.empty()
     
     # 리스트 준비
     if "업비트" in market:
@@ -80,17 +80,25 @@ if start_button:
         df = fdr.StockListing('NASDAQ')
         tickers = [(row['Symbol'], row['Symbol'], "NASDAQ", "america") for _, row in df.head(top_n).iterrows()]
 
-    # 스캔
+    # 스캔 시작
+    total = len(tickers[:top_n])
     for i, (sym, name, exch, scr) in enumerate(tickers[:top_n]):
-        progress_bar.progress((i + 1) / len(tickers[:top_n]))
-        res = get_custom_strategy_signal(sym, scr, exch, interval_map[tf_choice])
+        progress_bar.progress((i + 1) / total)
+        status_text.text(f"분석 중: {name} ({sym})")
+        
+        res = get_state_signal(sym, scr, exch, interval_map[tf_choice])
         if res:
-            st.success(f"🎯 **{name}({sym})** 포착!")
-            found_list.append({"종목": name, "심볼": sym, "현재가": res['price'], "하단1": round(res['l1'], 2), "하단2": round(res['l2'], 2)})
+            st.success(f"🎯 **{name}({sym})** BUY 신호 유지 중!")
+            found_list.append({
+                "종목": name, "심볼": sym, "현재가": res['price'], 
+                "1번하단(뚫음)": round(res['l1'], 2), "2번하단(터치)": round(res['l2'], 2)
+            })
         time.sleep(0.01)
+
+    status_text.text("✅ 스캔 완료!")
 
     if found_list:
         st.divider()
         st.table(pd.DataFrame(found_list))
     else:
-        st.warning("조건에 맞는 종목이 없습니다. 로직을 다시 한번 점검해볼까요?")
+        st.warning("조건을 만족하는 종목이 없습니다. 차트의 저가가 2번 하단에 닿았는지 확인해 보세요!")
