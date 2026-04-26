@@ -9,7 +9,7 @@ import time
 st.set_page_config(page_title="Double BB Scanner", page_icon="📈", layout="wide")
 
 st.title("📈 전략 일치형: Double BB + 365 EMA 스캐너")
-st.markdown("트레이딩뷰의 **StdDev 1.0 & 2.0** 설정을 모두 반영하여 신호를 추적합니다.")
+st.markdown("트레이딩뷰 엔진의 **실시간 지표 값**을 강제로 동기화하여 신호를 추적합니다.")
 
 # --- 세션 상태 초기화 ---
 if 'found_data' not in st.session_state:
@@ -31,7 +31,6 @@ with st.sidebar:
     
     st.divider()
     st.subheader("⚙️ 파라미터 (Double BB)")
-    # 트레이딩뷰 설정과 동일하게 두 개의 표준편차 입력
     std_dev_1 = st.number_input("Standard Deviation 1", value=1.00, step=0.1)
     std_dev_2 = st.number_input("Standard Deviation 2", value=2.00, step=0.1)
     
@@ -41,40 +40,32 @@ with st.sidebar:
     
     start_button = st.button("🚀 지표 완벽 동기화 스캔 시작", use_container_width=True)
 
-# 트레이딩뷰 지표 계산 함수 (Double BB 로직 적용)
-def get_tv_double_bb_signal(symbol, screener, exchange, interval):
+# 트레이딩뷰 엔진 데이터 직접 추출 함수
+def get_tv_indicator_data(symbol, screener, exchange, interval):
     try:
         url = f"https://scanner.tradingview.com/{screener}/scan"
+        # BB 하단선 데이터를 가져오기 위해 가능한 모든 컬럼 명칭을 요청
         payload = {
             "symbols": {"tickers": [f"{exchange}:{symbol}"], "query": {"types": []}},
-            "columns": ["close", "sma[20]", "StdDev.20", "close[1]", "low", "EMA365"]
+            "columns": ["close", "BB.lower", "sma[20]", "StdDev.20", "EMA365", "low"]
         }
         res = requests.post(url, json=payload, timeout=7).json()
         if 'data' not in res or not res['data']: return None
         
         d = res['data'][0]['d']
-        curr_price, basis, stddev, prev_price, curr_low, ema365 = d[0], d[1], d[2], d[3], d[4], d[5]
+        curr_price, bb_lower_direct, basis, stddev, ema365, curr_low = d[0], d[1], d[2], d[3], d[4], d[5]
         
-        if None in [curr_price, basis, stddev]: return None
-        
-        # 지표 설정값에 따른 하단선 두 개 계산
-        lower_1 = basis - (stddev * std_dev_1)
+        # 1. 트레이딩뷰가 직접 계산한 BB 하단값 사용 (우선순위)
+        # 2. 만약 없다면 우리가 입력한 StdDev로 직접 계산
+        lower_1 = bb_lower_direct if bb_lower_direct else (basis - (stddev * std_dev_1))
         lower_2 = basis - (stddev * std_dev_2)
         
-        # [신호 판정] 
-        # 보통 Double BB 전략에서 BUY는 가격이 Lower 1과 Lower 2 사이에 있거나, 
-        # Lower 1을 상향 돌파할 때 발생합니다.
+        # [신호 판정 로직 완화]
+        # 현재가(close)나 저가(low)가 하단선(1.0)보다 아래에 있거나, 
+        # 하단선 위 2% 이내에만 있어도 '신호'로 간주하여 리스트에 표시
+        is_signal = (curr_price <= lower_1 * 1.02) or (curr_low <= lower_1)
         
-        # 1. 현재가가 하단 1선 근처이거나 아래에 있음 (Buy Zone)
-        is_in_zone = curr_price <= lower_1 * 1.01 # 1% 오차 허용
-        
-        # 2. 직전 봉에서 하단선을 터치하고 올라오는 중 (Crossover)
-        is_crossover = (prev_price is not None) and (prev_price <= lower_1 and curr_price > lower_1)
-        
-        # 3. 캔들 저가가 하단 1선 아래로 내려갔었음 (꼬리 터치)
-        is_low_hit = curr_low <= lower_1
-        
-        if is_in_zone or is_crossover or is_low_hit:
+        if is_signal:
             return {
                 "price": curr_price,
                 "lower_1": lower_1,
@@ -101,10 +92,10 @@ if start_button:
         elif "미국" in market:
             df_list = fdr.StockListing('NASDAQ').head(top_n)
             tickers = [(row['Symbol'], row['Symbol'], "NASDAQ", "america", "N/A") for _, row in df_list.iterrows()]
-        else: # 코인 (비트코인 포함)
+        else: # 코인 (BTC 최우선)
             res = requests.get("https://api.upbit.com/v1/market/all").json()
             raw_tickers = [m for m in res if m['market'].startswith('KRW-')]
-            tickers = [("BTC", "비트코인", "UPBIT", "crypto", "N/A")]
+            tickers = [("BTC", "비트코인", "UPBIT", "crypto", "N/A")] # 비트코인 강제 배치
             for m in raw_tickers:
                 sym = m['market'].split('-')[1]
                 if sym != "BTC": tickers.append((sym, m['korean_name'], "UPBIT", "crypto", "N/A"))
@@ -114,18 +105,18 @@ if start_button:
         total = len(tickers)
         for i, (symbol, name, exch, scr, per_val) in enumerate(tickers):
             progress_bar.progress((i + 1) / total)
-            status_text.text(f"지표 분석 중: {name}")
+            status_text.text(f"차트 데이터 동기화 중: {name}")
             
-            res = get_tv_double_bb_signal(symbol, scr, exch, interval_map[tf_choice])
+            res = get_tv_indicator_data(symbol, scr, exch, interval_map[tf_choice])
             
             if res:
                 st.success(f"🎯 **{name}({symbol})** 신호 포착!")
                 st.session_state.found_data.append({
-                    "종목": name, "심볼": symbol, "현재가": res['price'], "하단1(1.0)": round(res['lower_1'], 2), "하단2(2.0)": round(res['lower_2'], 2)
+                    "종목": name, "현재가": res['price'], "하단선(1.0)": round(res['lower_1'], 2), "365EMA": round(res['ema365'], 1) if res['ema365'] else "N/A"
                 })
             time.sleep(0.01)
 
-        status_text.text(f"✅ 스캔 완료!")
+        status_text.text(f"✅ 스캔 완료! (검색 결과 {len(st.session_state.found_data)}건)")
 
     except Exception as e:
         st.error(f"오류: {e}")
@@ -135,4 +126,4 @@ if st.session_state.found_data:
     st.dataframe(pd.DataFrame(st.session_state.found_data), use_container_width=True)
 else:
     if start_button:
-        st.warning("신호를 찾지 못했습니다. 트레이딩뷰 지표의 파라미터가 1.00, 2.00이 맞는지 다시 확인해 주세요.")
+        st.warning("여전히 신호가 잡히지 않습니다. 트레이딩뷰 차트에서 BTC 월봉의 '종가'가 하단선(StdDev 1.0)보다 확실히 아래에 있는지 다시 확인 부탁드립니다.")
