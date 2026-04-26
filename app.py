@@ -21,7 +21,7 @@ with st.sidebar:
     market = st.selectbox("대상 선택", ["업비트 코인 (원화마켓)", "미국주식 (대형주)", "국내주식 (삼성/SK 등)"])
     
     # 🔹 시가총액 순위 종목 수 설정 슬라이더 추가
-    top_n = st.slider("시총 순위 범위 설정 (상위 N개)", min_value=10, max_value=300, value=100, step=10)
+    top_n = st.slider("시총 순위 범위 설정 (상위 N개)", min_value=10, max_value=1000, value=100, step=10)
     
     timeframe = st.selectbox("타임프레임", ["일봉", "주봉", "월봉"])
     start_button = st.button("🚀 분석 시작", use_container_width=True)
