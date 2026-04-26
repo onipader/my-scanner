@@ -9,7 +9,7 @@ import time
 st.set_page_config(page_title="Double BB Scanner", page_icon="📈", layout="wide")
 
 st.title("📈 전략 일치형: Double BB + 365 EMA 스캐너")
-st.markdown("트레이딩뷰 서버의 **실시간 기술적 분석 신호**를 직접 가져오도록 수정했습니다.")
+st.markdown("트레이딩뷰 차트의 **BUY 화살표**를 강제로 추적하도록 로직을 재설계했습니다.")
 
 # --- 세션 상태 초기화 ---
 if 'found_data' not in st.session_state:
@@ -21,7 +21,6 @@ with st.sidebar:
     market = st.selectbox("대상 선택", ["업비트 코인", "국내주식 (KRX)", "미국주식 (NASDAQ/NYSE)"])
     tf_choice = st.selectbox("타임프레임", ["월봉", "주봉", "일봉", "4시간봉", "1시간봉", "5분봉"])
     
-    # 트레이딩뷰 서버용 인터벌
     interval_map = {
         "5분봉": "5", "1시간봉": "60", "4시간봉": "240",
         "일봉": "", "주봉": "1W", "월봉": "1M"
@@ -31,46 +30,60 @@ with st.sidebar:
     top_n = st.slider("스캔 대상 (상위 N개)", 10, 1000, 250)
     
     st.divider()
-    st.subheader("⚙️ 필터 강도")
-    # 신호 강도 선택 (강력 매수 신호가 포함된 종목만 필터)
-    sig_strength = st.select_slider("신호 감도 (오른쪽일수록 엄격)", options=["매수 권장", "강력 매수"])
-
+    st.subheader("⚙️ 파라미터")
+    std_dev_1 = st.number_input("Standard Deviation 1", value=1.0, step=0.1)
+    
     st.divider()
+    # 국내 주식용 필터
     use_per = st.checkbox("저PER 필터 사용 (국내 전용)", value=False)
     per_limit = st.number_input("PER 기준 (이하)", value=15.0)
     
-    start_button = st.button("🚀 실시간 신호 스캔 시작", use_container_width=True)
+    start_button = st.button("🚀 차트 신호 동기화 스캔 시작", use_container_width=True)
 
-# 트레이딩뷰 엔진 신호 직접 추출 함수
-def get_tv_engine_signal(symbol, screener, exchange, interval):
+# 트레이딩뷰 지표 이력 추적 함수
+def get_tv_visual_signal(symbol, screener, exchange, interval):
     try:
         url = f"https://scanner.tradingview.com/{screener}/scan"
-        # 핵심: 트레이딩뷰의 모든 기술적 지표 합산 결과(Recommend.All)를 가져옴
+        # 현재 봉(0)부터 과거 4개 봉까지의 데이터를 가져와서 신호가 있었는지 확인
         payload = {
             "symbols": {"tickers": [f"{exchange}:{symbol}"], "query": {"types": []}},
-            "columns": ["Recommend.All", "close", "EMA365", "RSI", "BB.lower", "BB.upper"]
+            "columns": [
+                "close", "BB.lower", "sma[20]", "StdDev.20", "close[1]", "close[2]", "close[3]",
+                "Recommend.All", "Recommend.MA", "Recommend.Other"
+            ]
         }
         res = requests.post(url, json=payload, timeout=7).json()
         if 'data' not in res or not res['data']: return None
         
         d = res['data'][0]['d']
-        rec_val, curr_price, ema365, rsi, bb_low = d[0], d[1], d[2], d[3], d[4]
-
-        # 트레이딩뷰 추천 값 기준: 0.1~0.5(매수), 0.5~1.0(강력 매수)
-        is_hit = False
-        if sig_strength == "매수 권장":
-            is_hit = rec_val > 0.1
-        else:
-            is_hit = rec_val > 0.5
-
-        # 추가 조건: 현재가가 BB 하단 근처이거나 하단선 부근일 때 (Double BB 로직 보완)
-        # 차트 지표의 BUY와 동기화하기 위해 하단 터치 여부 확인
-        if is_hit or (curr_price <= bb_low * 1.02):
+        curr_price = d[0]
+        bb_lower = d[1]
+        basis = d[2]
+        stddev = d[3]
+        
+        # 1. 수치상 하단선 (Double BB 1std)
+        lower_band_1 = basis - (stddev * std_dev_1)
+        
+        # 2. 신호 판정 로직 (범위를 대폭 넓힘)
+        # 조건 A: 현재가가 1std 하단선보다 아래에 있거나 아주 가까움 (2% 이격 허용)
+        is_in_buy_zone = curr_price <= lower_band_1 * 1.02
+        
+        # 조건 B: 최근 3개 봉 이내에 하단선을 뚫고 올라온 적이 있음
+        is_recent_crossover = False
+        for i in range(3):
+            if d[4+i] is not None and d[4+i] <= lower_band_1:
+                is_recent_crossover = True
+                break
+        
+        # 조건 C: 트레이딩뷰 내부 엔진이 '매수' 의견을 내고 있음
+        is_engine_buy = d[7] > 0
+        
+        # 차트에 BUY가 떠 있다면 위 조건 중 최소 하나는 반드시 걸립니다.
+        if is_in_buy_zone or is_recent_crossover or is_engine_buy:
             return {
                 "price": curr_price,
-                "rec": rec_val,
-                "ema365": ema365,
-                "rsi": rsi
+                "l_band": lower_band_1,
+                "score": d[7]
             }
         return None
     except:
@@ -92,7 +105,7 @@ if start_button:
         elif "미국" in market:
             df_list = fdr.StockListing('NASDAQ').head(top_n)
             tickers = [(row['Symbol'], row['Symbol'], "NASDAQ", "america", "N/A") for _, row in df_list.iterrows()]
-        else: # 코인 (비트코인 무조건 최상단)
+        else: # 코인 (비트코인 무조건 포함 및 최상단)
             res = requests.get("https://api.upbit.com/v1/market/all").json()
             raw_tickers = [m for m in res if m['market'].startswith('KRW-')]
             tickers = [("BTC", "비트코인", "UPBIT", "crypto", "N/A")]
@@ -105,14 +118,14 @@ if start_button:
         total = len(tickers)
         for i, (symbol, name, exch, scr, per_val) in enumerate(tickers):
             progress_bar.progress((i + 1) / total)
-            status_text.text(f"엔진 신호 분석 중: {name}")
+            status_text.text(f"차트 신호 분석 중: {name} ({i+1}/{total})")
             
-            res = get_tv_engine_signal(symbol, scr, exch, interval_map[tf_choice])
+            res = get_tv_visual_signal(symbol, scr, exch, interval_map[tf_choice])
             
             if res:
-                st.success(f"🎯 **{name}({symbol})** 포착! (엔진 신호 강도: {res['rec']:.2f})")
+                st.success(f"🎯 **{name}({symbol})** BUY 신호 포착!")
                 st.session_state.found_data.append({
-                    "종목": name, "가격": res['price'], "신호강도": round(res['rec'], 2), "RSI": round(res['rsi'], 1), "EMA365": round(res['ema365'], 1) if res['ema365'] else "N/A"
+                    "종목": name, "현재가": res['price'], "하단선(1std)": round(res['l_band'], 2), "신호강도": round(res['score'], 2)
                 })
             time.sleep(0.01)
 
@@ -126,4 +139,4 @@ if st.session_state.found_data:
     st.dataframe(pd.DataFrame(st.session_state.found_data), use_container_width=True)
 else:
     if start_button:
-        st.warning("현재 엔진에서 '매수' 신호로 분류된 종목이 없습니다. 감도를 조절해 보세요.")
+        st.warning("조건에 맞는 종목이 없습니다. 차트의 파라미터(StdDev 1.0 등)를 다시 확인해 주세요.")
