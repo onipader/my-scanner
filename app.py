@@ -21,7 +21,6 @@ with st.sidebar:
     market = st.selectbox("대상 선택", ["국내주식 (KRX)", "미국주식 (NASDAQ/NYSE)", "업비트 코인"])
     tf_choice = st.selectbox("타임프레임", ["5분봉", "1시간봉", "4시간봉", "일봉", "주봉", "월봉"])
     
-    # 트레이딩뷰 API용 인터벌 매핑
     interval_map = {
         "5분봉": "5m", "1시간봉": "1h", "4시간봉": "4h",
         "일봉": "1d", "주봉": "1w", "월봉": "1M"
@@ -37,15 +36,15 @@ with st.sidebar:
     rsi_limit = st.slider("RSI 과매도 기준", 10, 70, 35)
     start_button = st.button("🚀 스캔 시작", use_container_width=True)
 
-# 트레이딩뷰 직접 요청 함수 (라이브러리 미설치 에러 방지)
+# 트레이딩뷰 직접 요청 함수
 def get_tv_data(symbol, screener, exchange, interval):
     try:
         url = f"https://scanner.tradingview.com/{screener}/scan"
         payload = {
             "symbols": {"tickers": [f"{exchange}:{symbol}"], "query": {"types": []}},
-            "columns": ["close", "BB.lower", "RSI", "Recommend.All"]
+            "columns": ["close", "BB.lower", "RSI"]
         }
-        res = requests.post(url, json=payload).json()
+        res = requests.post(url, json=payload, timeout=5).json()
         data = res['data'][0]['d']
         return {"price": data[0], "bb_low": data[1], "rsi": data[2]}
     except:
@@ -57,16 +56,27 @@ if start_button:
     status_text = st.empty()
 
     try:
-        # 1. 리스트 구성 및 PER 필터링
-        with st.spinner("리스트 분석 중..."):
+        # 1. 리스트 구성
+        with st.spinner("리스트 확보 중..."):
             if "국내" in market:
                 df_list = fdr.StockListing('KRX')
+                
+                # [해결 포인트] 시가총액 컬럼명 자동 매칭
+                cap_col = next((c for c in ['MarCap', '시가총액', 'Stocks'] if c in df_list.columns), None)
+                if cap_col:
+                    df_list[cap_col] = pd.to_numeric(df_list[cap_col], errors='coerce')
+                
+                # PER 필터
                 if use_per and 'PER' in df_list.columns:
                     df_list['PER'] = pd.to_numeric(df_list['PER'], errors='coerce')
                     df_list = df_list[(df_list['PER'] > 0) & (df_list['PER'] <= per_limit)]
                 
-                cap_col = next((c for c in ['MarCap', '시가총액'] if c in df_list.columns), 'MarCap')
-                df_list = df_list.sort_values(cap_col, ascending=False).head(int(top_n))
+                # 정렬 및 개수 제한
+                if cap_col:
+                    df_list = df_list.sort_values(cap_col, ascending=False).head(int(top_n))
+                else:
+                    df_list = df_list.head(int(top_n))
+                    
                 tickers = [(row['Code'], row['Name'], "KRX", "korea", row.get('PER', 'N/A')) for _, row in df_list.iterrows()]
             
             elif "미국" in market:
@@ -85,7 +95,6 @@ if start_button:
             res = get_tv_data(symbol, scr, exch, interval_map[tf_choice])
             
             if res and res['price'] and res['bb_low'] and res['rsi']:
-                # 조건: 현재가 <= 볼린저밴드 하단 AND RSI <= 설정값
                 if res['price'] <= res['bb_low'] and res['rsi'] <= rsi_limit:
                     st.success(f"✅ {name} 포착! (PER: {per_val}, RSI: {res['rsi']:.1f})")
                     st.session_state.found_data.append({
@@ -98,7 +107,7 @@ if start_button:
             st.divider()
             st.dataframe(pd.DataFrame(st.session_state.found_data), use_container_width=True)
         else:
-            st.warning("조건에 맞는 종목이 없습니다. 필터를 조정해 보세요.")
+            st.warning("조건에 맞는 종목이 없습니다.")
 
     except Exception as e:
         st.error(f"오류: {e}")
