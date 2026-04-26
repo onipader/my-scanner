@@ -1,65 +1,64 @@
 import streamlit as st
-import requests
+import yfinance as yf
 import pandas as pd
+import datetime
 
-st.set_page_config(page_title="Real Signal Finder", layout="wide")
-st.title("🎯 차트 'BUY' 글자 일치 검색기")
+st.set_page_config(page_title="Bollinger Band Scanner", layout="wide")
+st.title("📊 야후 파이낸스 기반 볼밴 하단 스캐너")
 
 with st.sidebar:
-    st.header("⚙️ 검색 설정")
-    market = st.selectbox("시장", ["업비트 코인", "국내주식", "미국주식"])
-    tf_choice = st.selectbox("타임프레임", ["월봉", "주봉", "일봉", "4시간봉"])
-    top_n = st.number_input("스캔 범위 (상위 N개)", min_value=50, max_value=500, value=100, step=50)
+    st.header("⚙️ 설정")
+    target_market = st.selectbox("대상 시장", ["코인 (BTC/ETH 등)", "미국 주식"])
+    period = st.selectbox("데이터 기간", ["1y", "2y", "5y"])
+    interval = st.selectbox("봉 단위 (타임프레임)", ["1mo", "1wk", "1d"])
     
-    tf_map = {"월봉": "1M", "주봉": "1W", "일봉": "", "4시간봉": "240"}
-    st.info("차트 상단에 'BUY'가 선명하게 뜬 종목만 찾아냅니다.")
-    start_btn = st.button("🚀 진짜 신호 종목 리스트업", use_container_width=True)
+    st.info("야후 파이낸스 데이터를 직접 계산하여 하단 돌파 종목을 찾습니다.")
+    start_btn = st.button("🚀 스캔 시작")
 
-def get_accurate_signal(m_name, itv, limit):
-    url_map = {"업비트 코인": "crypto", "국내주식": "korea", "미국주식": "america"}
-    api_url = f"https://scanner.tradingview.com/{url_map[m_name]}/scan"
-    
-    sig_col = f"Recommend.All|{itv}" if itv else "Recommend.All"
-    cols = [sig_col, "close", "BB.lower", "description", "name"]
+# 코인 리스트 (야후 파이낸스 티커 기준)
+COIN_TICKERS = [
+    "BTC-USD", "ETH-USD", "BCH-USD", "SOL-USD", "XRP-USD", 
+    "ADA-USD", "DOGE-USD", "DOT-USD", "MATIC-USD", "TRX-USD",
+    "AVAX-USD", "SHIB-USD", "LINK-USD", "NEAR-USD", "UNI-USD"
+]
 
-    payload = {
-        "filter": [
-            # 🔹 기준을 0.25로 강화 (비트코인 캐시 같은 '뉴트럴' 차단용)
-            {"left": sig_col, "operation": "greater", "right": 0.25}
-        ],
-        "markets": [url_map[m_name]],
-        "columns": cols,
-        "sort": {"column": "market_cap_basic", "direction": "desc"},
-        "range": [0, limit]
-    }
-    
-    if m_name == "업비트 코인":
-        payload["filter"].append({"left": "name", "operation": "match", "right": "KRW"})
-        payload["filter"].append({"left": "exchange", "operation": "equal", "right": "UPBIT"})
+# 미국 주식 리스트 (시총 상위 예시)
+STOCK_TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META", "BRK-B", "UNH", "V"]
 
+def calculate_bb(ticker, p, i):
     try:
-        res = requests.post(api_url, json=payload, timeout=10).json()
-        return res.get('data', [])
-    except: return []
+        df = yf.download(ticker, period=p, interval=i, progress=False)
+        if df.empty: return None
+        
+        # 볼린저 밴드 계산 (20일 표준)
+        df['MA20'] = df['Close'].rolling(window=20).mean()
+        df['STD'] = df['Close'].rolling(window=20).std()
+        df['Upper'] = df['MA20'] + (df['STD'] * 2)
+        df['Lower'] = df['MA20'] - (df['STD'] * 2)
+        
+        last_row = df.iloc[-1]
+        return {
+            "Symbol": ticker,
+            "Price": round(float(last_row['Close']), 2),
+            "Lower": round(float(last_row['Lower']), 2),
+            "Status": "하단 돌파" if last_row['Close'] <= last_row['Lower'] else "근접"
+        }
+    except:
+        return None
 
 if start_btn:
-    raw = get_accurate_signal(market, tf_map[tf_choice], top_n)
+    tickers = COIN_TICKERS if target_market == "코인 (BTC/ETH 등)" else STOCK_TICKERS
+    results = []
     
-    if not raw:
-        st.warning("현재 확실한 'BUY' 신호가 확인된 종목이 없습니다.")
+    with st.spinner("데이터 분석 중..."):
+        for t in tickers:
+            res = calculate_bb(t, period, interval)
+            if res:
+                results.append(res)
+    
+    if results:
+        df_res = pd.DataFrame(results)
+        st.table(df_res)
+        st.success("스캔이 완료되었습니다.")
     else:
-        results = []
-        for item in raw:
-            d = item.get('d', [])
-            results.append({
-                "종목명": d[3],
-                "신호 강도": "Strong Buy" if d[0] > 0.5 else "Buy",
-                "현재가": f"{d[1]:,.1f}",
-                "볼밴 하단": f"{d[2]:,.1f}" if d[2] else "N/A"
-            })
-
-        if results:
-            # 신호 강도순으로 정렬하여 출력
-            df = pd.DataFrame(results)
-            st.table(df)
-            st.success(f"차트의 'BUY' 글자와 일치하는 {len(results)}개 종목을 찾았습니다.")
+        st.error("데이터를 가져오지 못했습니다.")
