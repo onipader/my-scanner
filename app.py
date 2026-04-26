@@ -2,124 +2,95 @@ import streamlit as st
 import FinanceDataReader as fdr
 import pandas as pd
 import requests
-from datetime import datetime
 import time
 
-# 페이지 설정
 st.set_page_config(page_title="Double BB Scanner", page_icon="📈", layout="wide")
-
-st.title("📈 차트 신호 동기화: Double BB + 365 EMA 스캐너")
-st.markdown("트레이딩뷰 차트의 **BUY 화살표**를 실시간으로 추적하여 리스트업합니다.")
-
-# --- 세션 상태 초기화 ---
-if 'found_data' not in st.session_state:
-    st.session_state.found_data = []
+st.title("📈 사용자 전략 동기화: Double BB 전용 스캐너")
+st.markdown("로직: **StdDev 2.0 하단 터치 후 1.0 하단 상향 돌파** 종목 포착")
 
 # 사이드바 설정
 with st.sidebar:
     st.header("🔍 전략 설정")
     market = st.selectbox("대상 선택", ["업비트 코인", "국내주식 (KRX)", "미국주식 (NASDAQ/NYSE)"])
-    tf_choice = st.selectbox("타임프레임", ["월봉", "주봉", "일봉", "4시간봉", "1시간봉", "5분봉"])
+    tf_choice = st.selectbox("타임프레임", ["월봉", "주봉", "일봉", "4시간봉", "1시간봉"])
     
-    interval_map = {
-        "5분봉": "5", "1시간봉": "60", "4시간봉": "240",
-        "일봉": "", "주봉": "1W", "월봉": "1M"
-    }
+    interval_map = {"1시간봉": "60", "4시간봉": "240", "일봉": "", "주봉": "1W", "월봉": "1M"}
+    
+    st.divider()
+    top_n = st.number_input("스캔 대상 개수", value=250, min_value=10)
+    
+    st.subheader("⚙️ 지표 설정 (사용자 정의)")
+    sd1 = st.number_input("Standard Deviation 1", value=1.0)
+    sd2 = st.number_input("Standard Deviation 2", value=2.0)
+    
+    start_button = st.button("🚀 내 전략으로 스캔 시작", use_container_width=True)
 
-    st.divider()
-    top_n = st.slider("스캔 대상 (상위 N개)", 10, 1000, 250)
-    
-    st.divider()
-    st.subheader("⚙️ 신호 감도")
-    # 차트의 BUY와 일치시키기 위해 감도를 조정 가능하게 함
-    sensitivity = st.slider("신호 감도 (낮을수록 더 많이 포착)", -0.5, 0.5, 0.0, step=0.1)
-    
-    st.divider()
-    use_per = st.checkbox("저PER 필터 사용 (국내 전용)", value=False)
-    per_limit = st.number_input("PER 기준 (이하)", value=15.0)
-    
-    start_button = st.button("🚀 차트 신호 직접 스캔 시작", use_container_width=True)
-
-# 트레이딩뷰 내부 엔진 신호 추출 함수
-def get_tv_direct_signal(symbol, screener, exchange, interval):
+def get_custom_strategy_signal(symbol, screener, exchange, interval):
     try:
         url = f"https://scanner.tradingview.com/{screener}/scan"
-        # Recommend.All: 모든 지표를 종합하여 트레이딩뷰가 내리는 결론 (BUY/SELL)
+        # 현재 봉(0)과 직전 봉(1)의 데이터를 모두 가져와서 흐름을 분석
         payload = {
             "symbols": {"tickers": [f"{exchange}:{symbol}"], "query": {"types": []}},
-            "columns": ["Recommend.All", "close", "EMA365", "BB.lower", "low", "open"]
+            "columns": [
+                "close", "low", "sma[20]", "StdDev.20", "open",
+                "close[1]", "low[1]", "sma[20][1]", "StdDev.20[1]"
+            ]
         }
         res = requests.post(url, json=payload, timeout=7).json()
         if 'data' not in res or not res['data']: return None
         
         d = res['data'][0]['d']
-        # d[0]: 종합 추천(1.0에 가까울수록 강한 BUY), d[1]: 현재가, d[2]: EMA365, d[3]: BB하단
-        rec_val, curr_price, ema365, bb_low, low_val, open_val = d[0], d[1], d[2], d[3], d[4], d[5]
+        # 현재 데이터
+        curr_c, curr_l, curr_ma, curr_sd, curr_o = d[0], d[1], d[2], d[3], d[4]
+        # 직전 데이터
+        prev_c, prev_l, prev_ma, prev_sd = d[5], d[6], d[7], d[8]
 
-        # [판정 핵심] 
-        # 차트에 BUY가 떠 있다면 rec_val은 0보다 큽니다.
-        # 또한, 현재가가 BB하단 근처(Double BB 구간)에 있는지도 함께 확인합니다.
-        is_buy_signal = (rec_val > sensitivity) or (curr_price <= bb_low * 1.02) or (low_val <= bb_low)
+        # 밴드 계산
+        curr_l1 = curr_ma - (curr_sd * sd1)
+        curr_l2 = curr_ma - (curr_sd * sd2)
+        prev_l1 = prev_ma - (prev_sd * sd1)
+        prev_l2 = prev_ma - (prev_sd * sd2)
 
-        if is_buy_signal:
-            return {
-                "price": curr_price,
-                "rec": rec_val,
-                "ema": ema365,
-                "bb_low": bb_low
-            }
+        # --- 사용자 로직 구현 ---
+        # 조건 1: (현재 혹은 직전 봉에서) 2.0 하단을 터치했거나 그 근처였음
+        was_touching_l2 = (curr_l <= curr_l2 * 1.005) or (prev_l <= prev_l2 * 1.005)
+        
+        # 조건 2: 1.0 하단을 상향 돌파 (현재 종가가 1.0 하단 위, 시가나 직전 종가는 아래)
+        is_crossing_l1 = (curr_c > curr_l1) and (prev_c <= prev_l1 or curr_o <= curr_l1)
+
+        # 두 조건이 이번 캔들 범위 안에서 만족되면 BUY
+        if was_touching_l2 and is_crossing_l1:
+            return {"price": curr_c, "l1": curr_l1, "l2": curr_l2}
         return None
     except:
         return None
 
 if start_button:
-    st.session_state.found_data = []
+    found_list = []
     progress_bar = st.progress(0)
-    status_text = st.empty()
+    
+    # 리스트 준비
+    if "업비트" in market:
+        res = requests.get("https://api.upbit.com/v1/market/all").json()
+        tickers = [(m['market'].split('-')[1], m['korean_name'], "UPBIT", "crypto") for m in res if m['market'].startswith('KRW-')]
+    elif "국내" in market:
+        df = fdr.StockListing('KRX')
+        tickers = [(row['Code'], row['Name'], "KRX", "korea") for _, row in df.head(top_n).iterrows()]
+    else:
+        df = fdr.StockListing('NASDAQ')
+        tickers = [(row['Symbol'], row['Symbol'], "NASDAQ", "america") for _, row in df.head(top_n).iterrows()]
 
-    try:
-        # 1. 리스트 구성
-        if "국내" in market:
-            df_list = fdr.StockListing('KRX')
-            if use_per:
-                df_list['PER'] = pd.to_numeric(df_list.get('PER'), errors='coerce')
-                df_list = df_list[(df_list['PER'] > 0) & (df_list['PER'] <= per_limit)]
-            tickers = [(row['Code'], row['Name'], "KRX", "korea") for _, row in df_list.head(top_n).iterrows()]
-        elif "미국" in market:
-            df_list = fdr.StockListing('NASDAQ').head(top_n)
-            tickers = [(row['Symbol'], row['Symbol'], "NASDAQ", "america") for _, row in df_list.iterrows()]
-        else: # 코인 (BTC 최우선 배치)
-            res = requests.get("https://api.upbit.com/v1/market/all").json()
-            raw_tickers = [m for m in res if m['market'].startswith('KRW-')]
-            tickers = [("BTC", "비트코인", "UPBIT", "crypto")]
-            for m in raw_tickers:
-                sym = m['market'].split('-')[1]
-                if sym != "BTC": tickers.append((sym, m['korean_name'], "UPBIT", "crypto"))
-            tickers = tickers[:top_n]
+    # 스캔
+    for i, (sym, name, exch, scr) in enumerate(tickers[:top_n]):
+        progress_bar.progress((i + 1) / len(tickers[:top_n]))
+        res = get_custom_strategy_signal(sym, scr, exch, interval_map[tf_choice])
+        if res:
+            st.success(f"🎯 **{name}({sym})** 포착!")
+            found_list.append({"종목": name, "심볼": sym, "현재가": res['price'], "하단1": round(res['l1'], 2), "하단2": round(res['l2'], 2)})
+        time.sleep(0.01)
 
-        # 2. 분석 실행
-        total = len(tickers)
-        for i, (symbol, name, exch, scr) in enumerate(tickers):
-            progress_bar.progress((i + 1) / total)
-            status_text.text(f"차트 내부 신호 확인 중: {name}")
-            
-            res = get_tv_direct_signal(symbol, scr, exch, interval_map[tf_choice])
-            
-            if res:
-                st.success(f"🎯 **{name}({symbol})** 포착! (신호 강도: {res['rec']:.2f})")
-                st.session_state.found_data.append({
-                    "종목": name, "가격": res['price'], "BB하단": round(res['bb_low'], 2) if res['bb_low'] else "N/A", "신호강도": round(res['rec'], 2), "365EMA": round(res['ema'], 1) if res['ema'] else "N/A"
-                })
-            time.sleep(0.01)
-
-        status_text.text(f"✅ 스캔 완료! (총 {len(st.session_state.found_data)}건 발견)")
-
-    except Exception as e:
-        st.error(f"오류 발생: {e}")
-
-if st.session_state.found_data:
-    st.divider()
-    st.dataframe(pd.DataFrame(st.session_state.found_data), use_container_width=True)
-else:
-    if start_button:
-        st.warning("조건에 부합하는 종목이 없습니다. 사이드바의 '신호 감도'를 낮춰서 다시 시도해 보세요.")
+    if found_list:
+        st.divider()
+        st.table(pd.DataFrame(found_list))
+    else:
+        st.warning("조건에 맞는 종목이 없습니다. 로직을 다시 한번 점검해볼까요?")
