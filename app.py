@@ -4,24 +4,23 @@ import pandas as pd
 import requests
 import time
 
-# 페이지 설정
+# -------------------- 기본 설정 --------------------
 st.set_page_config(page_title="Double BB Scanner", page_icon="📈", layout="wide")
 
-st.title("📈 Double BB + EMA365 스캐너 (트뷰 호환 개선판)")
-st.markdown("트레이딩뷰 기준 **현재 BUY 상태 유지 + 최근 교차 신호** 모두 탐지")
+st.title("📈 Double BB + EMA365 스캐너 (트뷰 일치 버전)")
+st.markdown("트레이딩뷰 기준 BUY 상태 최대한 동일하게 탐지")
 
-# 세션 상태 초기화
 if 'found_data' not in st.session_state:
     st.session_state.found_data = []
 
 # -------------------- 사이드바 --------------------
 with st.sidebar:
-    st.header("🔍 전략 설정")
+    st.header("🔍 설정")
 
-    market = st.selectbox("대상 선택", [
+    market = st.selectbox("시장", [
         "업비트 코인",
-        "국내주식 (KRX)",
-        "미국주식 (NASDAQ/NYSE)"
+        "국내주식",
+        "미국주식"
     ])
 
     tf_choice = st.selectbox("타임프레임", [
@@ -37,31 +36,22 @@ with st.sidebar:
         "월봉": "1M"
     }
 
-    st.divider()
-
-    mode = st.selectbox("신호 탐지 방식", [
+    mode = st.selectbox("신호 방식", [
         "현재 BUY 상태",
-        "최근 교차 발생"
+        "최근 교차"
     ])
 
-    top_n = st.slider("스캔 대상 수", 10, 1000, 200)
+    top_n = st.slider("스캔 개수", 10, 500, 150)
 
     st.divider()
 
-    st.subheader("⚙️ Double BB 설정")
-    std_dev_1 = st.number_input("표준편차 1 (기본 BUY)", value=1.0, step=0.1)
-    std_dev_2 = st.number_input("표준편차 2 (강한 저점)", value=2.0, step=0.1)
+    std_dev_1 = st.number_input("BB 1σ", value=1.0)
+    std_dev_2 = st.number_input("BB 2σ", value=2.0)
 
-    use_strong = st.checkbox("극단 저점만 (2σ)", value=False)
-    use_ema = st.checkbox("EMA365 위 종목만", value=False)
-
-    st.divider()
-
-    use_per = st.checkbox("저 PER 필터 (국내)", value=False)
-    per_limit = st.number_input("PER 이하", value=15.0)
+    use_strong = st.checkbox("2σ만 사용", value=False)
+    use_ema = st.checkbox("EMA365 필터", value=False)
 
     start_button = st.button("🚀 스캔 시작", use_container_width=True)
-
 
 # -------------------- 핵심 함수 --------------------
 def get_tv_signal(symbol, screener, exchange, interval):
@@ -81,7 +71,8 @@ def get_tv_signal(symbol, screener, exchange, interval):
                 "tickers": [f"{exchange}:{symbol}"],
                 "query": {"types": []}
             },
-            "columns": columns
+            "columns": columns,
+            "interval": interval  # ✅ 핵심
         }
 
         res = requests.post(url, json=payload, timeout=10).json()
@@ -100,42 +91,44 @@ def get_tv_signal(symbol, screener, exchange, interval):
         if None in [close, ma, sd]:
             return None
 
-        # Bollinger
+        # BB 계산
         l1 = ma - (sd * std_dev_1)
         l2 = ma - (sd * std_dev_2)
 
-        # ---------------- 핵심 로직 ----------------
-        # 현재 BUY 상태
+        # ---------------- 핵심 ----------------
+        # 트뷰 오차 보정 (중요)
+        tolerance = 1.01
+
         if use_strong:
-            buy_now = close <= l2
+            buy_now = close <= l2 * tolerance
         else:
-            buy_now = close <= l1
+            buy_now = close <= l1 * tolerance
 
         # EMA 필터
         if use_ema and ema365:
             if close < ema365:
                 buy_now = False
 
-        # 최근 교차 (하단선 돌파)
+        # 최근 교차
         cross = False
         if prev_close and prev_close <= l1 and close > l1:
             cross = True
 
-        # 모드 선택
+        # 모드 분기
         if mode == "현재 BUY 상태":
             if buy_now:
                 return {
                     "price": close,
                     "signal": "BUY 유지",
-                    "ema365": ema365
+                    "ema": ema365
                 }
 
-        elif mode == "최근 교차 발생":
+        elif mode == "최근 교차":
             if cross:
                 return {
                     "price": close,
-                    "signal": "최근 교차",
-                    "ema365": ema365
+                    "signal": "교차 발생",
+                    "ema": ema365
                 }
 
         return None
@@ -143,58 +136,51 @@ def get_tv_signal(symbol, screener, exchange, interval):
     except:
         return None
 
-
 # -------------------- 실행 --------------------
 if start_button:
     st.session_state.found_data = []
 
-    progress_bar = st.progress(0)
-    status_text = st.empty()
+    progress = st.progress(0)
+    status = st.empty()
 
     try:
-        # 종목 리스트
+        # ---------------- 종목 리스트 ----------------
         if "국내" in market:
-            df_list = fdr.StockListing('KRX')
-
-            if use_per:
-                df_list['PER'] = pd.to_numeric(df_list.get('PER'), errors='coerce')
-                df_list = df_list[
-                    (df_list['PER'] > 0) &
-                    (df_list['PER'] <= per_limit)
-                ]
+            df = fdr.StockListing('KRX')
 
             tickers = [
                 (row['Code'], row['Name'], "KRX", "korea")
-                for _, row in df_list.head(top_n).iterrows()
+                for _, row in df.head(top_n).iterrows()
             ]
 
         elif "미국" in market:
-            df_list = fdr.StockListing('NASDAQ').head(top_n)
+            df = fdr.StockListing('NASDAQ').head(top_n)
 
             tickers = [
                 (row['Symbol'], row['Symbol'], "NASDAQ", "america")
-                for _, row in df_list.iterrows()
+                for _, row in df.iterrows()
             ]
 
         else:
             res = requests.get("https://api.upbit.com/v1/market/all").json()
             raw = [m for m in res if m['market'].startswith('KRW-')]
 
-            tickers = [("BTC", "비트코인", "UPBIT", "crypto")]
+            # ✅ BTC 수정 완료
+            tickers = [("BTCKRW", "비트코인", "UPBIT", "crypto")]
 
             for m in raw:
-                sym = m['market'].split('-')[1]
+                sym = m['market'].replace("KRW-", "")
                 if sym != "BTC":
-                    tickers.append((sym, m['korean_name'], "UPBIT", "crypto"))
+                    tickers.append((f"{sym}KRW", m['korean_name'], "UPBIT", "crypto"))
 
             tickers = tickers[:top_n]
 
-        # ---------------- 실행 ----------------
+        # ---------------- 분석 ----------------
         total = len(tickers)
 
         for i, (symbol, name, exch, scr) in enumerate(tickers):
-            progress_bar.progress((i + 1) / total)
-            status_text.text(f"분석중: {name}")
+            progress.progress((i + 1) / total)
+            status.text(f"분석중: {name}")
 
             result = get_tv_signal(
                 symbol,
@@ -204,22 +190,21 @@ if start_button:
             )
 
             if result:
-                st.success(f"🎯 {name} ({symbol}) → {result['signal']}")
+                st.success(f"🎯 {name} → {result['signal']}")
 
                 st.session_state.found_data.append({
                     "종목": name,
                     "가격": result['price'],
                     "신호": result['signal'],
-                    "EMA365": round(result['ema365'], 1) if result['ema365'] else "N/A"
+                    "EMA365": round(result['ema'], 1) if result['ema'] else "N/A"
                 })
 
             time.sleep(0.01)
 
-        status_text.text(f"✅ 완료: {len(st.session_state.found_data)}개 발견")
+        status.text(f"✅ 완료: {len(st.session_state.found_data)}개 발견")
 
     except Exception as e:
-        st.error(f"오류 발생: {e}")
-
+        st.error(f"에러 발생: {e}")
 
 # -------------------- 결과 --------------------
 if st.session_state.found_data:
