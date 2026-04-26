@@ -10,8 +10,8 @@ import io
 # 페이지 설정
 st.set_page_config(page_title="글로벌 자산 스캐너", page_icon="💰", layout="wide")
 
-st.title("💰 글로벌 주식 & 코인 매수신호 스캐너 (수정본)")
-st.markdown("전 세계 주식과 코인을 분석하여 **볼린저 밴드 하단 돌파 + RSI 과매도 + MA200 추세**를 분석합니다.")
+st.title("💰 글로벌 주식 & 코인 매수신호 스캐너")
+st.markdown("전 세계 자산을 분석하여 **볼린저 밴드 하단 돌파 + RSI 과매도 + MA200 추세**를 체크합니다.")
 
 # --- 세션 상태 초기화 ---
 if 'found_data' not in st.session_state:
@@ -49,11 +49,17 @@ def calculate_rsi(series, period=14):
 
 def check_signal(df):
     """매수 신호 계산기"""
-    if len(df) < 200: return None 
+    if df is None or len(df) < 20: return None
     
-    # yfinance 대응: 데이터가 Series가 아닐 경우를 대비해 처리
-    close = df['Close'].squeeze()
+    # 데이터가 MultiIndex인 경우 처리
+    if isinstance(df.columns, pd.MultiIndex):
+        close = df['Close'].iloc[:, 0]
+    else:
+        close = df['Close']
     
+    close = close.dropna()
+    if len(close) < 20: return None
+
     # 1. 볼린저 밴드 계산
     basis = close.rolling(window=20).mean()
     std = close.rolling(window=20).std()
@@ -62,20 +68,29 @@ def check_signal(df):
     # 2. RSI 계산
     rsi = calculate_rsi(close)
     
-    # 3. MA200 계산
-    ma200 = close.rolling(window=200).mean()
+    # 3. MA200 계산 (데이터가 충분할 때만)
+    ma200 = close.rolling(window=200).mean() if len(close) >= 200 else None
     
     curr_price = float(close.iloc[-1])
     prev_price = float(close.iloc[-2])
     curr_lower = float(lower_band.iloc[-1])
     curr_rsi = float(rsi.iloc[-1])
-    curr_ma200 = float(ma200.iloc[-1])
     
     # --- 조건 검증 ---
+    # 조건 A: 볼린저 하단 상향 돌파 (이전 봉은 아래, 현재 봉은 위)
     is_bb_low = prev_price < curr_lower and curr_price > curr_lower
-    is_rsi_low = curr_rsi < 35 if use_rsi else True
-    is_trend_up = curr_price > curr_ma200 if use_ma200 else True
     
+    # 조건 B: RSI 필터
+    is_rsi_low = curr_rsi < 35 if use_rsi else True
+    
+    # 조건 C: MA200 추세 필터
+    is_trend_up = True
+    if use_ma200:
+        if ma200 is not None and not pd.isna(ma200.iloc[-1]):
+            is_trend_up = curr_price > ma200.iloc[-1]
+        else:
+            is_trend_up = False # 데이터 부족 시 필터 탈락
+
     if is_bb_low and is_rsi_low and is_trend_up:
         return {"price": curr_price, "rsi": curr_rsi}
     return None
@@ -92,7 +107,7 @@ if start_button:
             
             for i, m in enumerate(markets):
                 progress_bar.progress((i + 1) / len(markets))
-                status_text.text(f"코인 분석 중: {i+1}/{len(markets)} ({m['korean_name']})")
+                status_text.text(f"코인 분석 중: {m['korean_name']}")
                 
                 unit = time_map[timeframe]
                 if unit in ['month', 'week', 'day']:
@@ -106,50 +121,74 @@ if start_button:
                 
                 res_signal = check_signal(temp_df)
                 if res_signal:
-                    st.success(f"✅ **{m['korean_name']}** 포착!")
+                    st.success(f"✅ **{m['korean_name']}** 신호 포착!")
                     st.session_state.found_data.append({
                         "시간": datetime.now().strftime('%H:%M'),
                         "종목": m['korean_name'],
                         "현재가": res_signal['price'],
                         "RSI": round(res_signal['rsi'], 2)
                     })
-                time.sleep(0.1) # API 제한 방지
+                time.sleep(0.1)
         except Exception as e:
-            st.error(f"코인 데이터를 가져오는 중 오류 발생: {e}")
+            st.error(f"오류 발생: {e}")
             
     else:
         is_kr = "국내" in market
-        if is_kr:
-            try:
+        try:
+            if is_kr:
                 kospi = fdr.StockListing('KOSPI')
                 kosdaq = fdr.StockListing('KOSDAQ')
                 stock_list = pd.concat([kospi, kosdaq])
-                # FinanceDataReader 상장사 리스트의 컬럼명은 'Code'입니다.
-                tickers = [row['Code'] for _, row in stock_list.iterrows()]
-            except Exception as e:
-                st.error(f"종목 리스트를 불러오는 중 오류가 발생했습니다: {e}")
-                tickers = []
-        else:
-            try:
-                stock_list = pd.concat([fdr.StockListing('NASDAQ'), fdr.StockListing('NYSE')])
-                tickers = stock_list['Symbol'].dropna().unique().tolist()
-            except:
-                tickers = []
+                tickers_raw = stock_list[['Code', 'Market', 'Name']].values.tolist()
+            else:
+                nasdaq = fdr.StockListing('NASDAQ')
+                nyse = fdr.StockListing('NYSE')
+                stock_list = pd.concat([nasdaq, nyse])
+                tickers_raw = [[row['Symbol'], 'US', row['Name']] for _, row in stock_list.iterrows()]
+        except Exception as e:
+            st.error(f"리스트 로딩 실패: {e}")
+            tickers_raw = []
 
         inter, per = yf_time_map[timeframe]
         progress_bar = st.progress(0)
         status_text = st.empty()
 
-        # 분석 속도를 위해 상위 100개 또는 샘플링 권장 (전체 종목은 시간이 매우 오래 걸림)
-        search_limit = 200 # 테스트용 제한
-        for i, t in enumerate(tickers[:search_limit]):
-            progress_bar.progress((i + 1) / search_limit)
-            status_text.text(f"주식 분석 중: {i+1}/{search_limit} ({t})")
+        # 실시간 성능을 위해 상위 일부 종목만 스캔 (전체 스캔 시 매우 오래 걸림)
+        scan_limit = 100 
+        for i, (code, mkt, name) in enumerate(tickers_raw[:scan_limit]):
+            progress_bar.progress((i + 1) / scan_limit)
+            status_text.text(f"주식 분석 중: {name} ({code})")
             try:
-                # yfinance 종목 코드 포맷 수정 (국내주식의 경우 .KS / .KQ 필요)
-                symbol = t
                 if is_kr:
-                    symbol = t + ('.KS' if any(stock_list[stock_list['Code']==t]['Market']=='KOSPI') else '.KQ')
+                    symbol = code + ('.KS' if mkt == 'KOSPI' else '.KQ')
+                else:
+                    symbol = code
                 
                 data = yf.download(symbol, interval=inter, period=per, progress=False)
-                if data
+                
+                if data.empty or len(data) < 20:
+                    continue
+                
+                res_signal = check_signal(data)
+                if res_signal:
+                    st.success(f"✅ **{name} ({symbol})** 신호 포착!")
+                    st.session_state.found_data.append({
+                        "시간": datetime.now().strftime('%H:%M'),
+                        "종목": f"{name} ({symbol})",
+                        "현재가": res_signal['price'],
+                        "RSI": round(res_signal['rsi'], 2)
+                    })
+            except:
+                continue
+
+# --- 결과 출력 ---
+if st.session_state.found_data:
+    st.divider()
+    st.subheader("📊 분석 결과 요약")
+    result_df = pd.DataFrame(st.session_state.found_data)
+    st.dataframe(result_df, use_container_width=True)
+    
+    csv_data = result_df.to_csv(index=False).encode('utf-8-sig')
+    st.download_button("📥 결과 다운로드 (CSV)", csv_data, f"signal_{datetime.now().strftime('%m%d_%H%M')}.csv", "text/csv")
+elif start_button:
+    st.warning("조건에 맞는 종목이 없습니다. 필터를 조정해 보세요.")
