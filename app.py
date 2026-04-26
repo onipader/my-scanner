@@ -2,8 +2,8 @@ import streamlit as st
 import requests
 import pandas as pd
 
-st.set_page_config(page_title="Real Chart Signal Scanner", layout="wide")
-st.title("🎯 진짜 차트 'Buy' 신호 종목 검색기")
+st.set_page_config(page_title="Real Candle Signal Scanner", layout="wide")
+st.title("🎯 차트 캔들 'Buy' 신호 일치 검색기")
 
 with st.sidebar:
     st.header("⚙️ 검색 설정")
@@ -12,21 +12,20 @@ with st.sidebar:
     top_n = st.number_input("스캔 범위 (상위 N개)", min_value=50, max_value=500, value=100, step=50)
     
     tf_map = {"월봉": "1M", "주봉": "1W", "일봉": "", "4시간봉": "240"}
-    st.info("차트의 'Technicals' 바늘이 BUY 이상인 종목만 추출합니다.")
-    start_btn = st.button("🚀 진짜 신호 종목 찾기", use_container_width=True)
+    st.info("차트 캔들에 'BUY' 신호가 뜬 종목들을 찾아냅니다.")
+    start_btn = st.button("🚀 신호 종목 리스트업", use_container_width=True)
 
-def get_real_signal(m_name, itv, limit):
+def get_broad_signal(m_name, itv, limit):
     url_map = {"업비트 코인": "crypto", "국내주식": "korea", "미국주식": "america"}
     api_url = f"https://scanner.tradingview.com/{url_map[m_name]}/scan"
     
-    # recommendation 필드가 차트 하단의 '바늘' 상태를 결정합니다.
-    sig_col = f"recommendation|{itv}" if itv else "recommendation"
+    # 🔹 추천 점수가 조금이라도 양수인(+) 종목은 일단 다 가져옵니다.
+    sig_col = f"Recommend.All|{itv}" if itv else "Recommend.All"
     cols = [sig_col, "close", "BB.lower", "description", "name"]
 
     payload = {
         "filter": [
-            # 🔹 1(Buy), 2(Strong Buy)인 종목만 서버에서 필터링
-            {"left": sig_col, "operation": "in_range", "right": [1, 2]} 
+            {"left": sig_col, "operation": "greater", "right": -0.1} # 필터를 대폭 완화
         ],
         "markets": [url_map[m_name]],
         "columns": cols,
@@ -44,29 +43,22 @@ def get_real_signal(m_name, itv, limit):
     except: return []
 
 if start_btn:
-    raw = get_real_signal(market, tf_map[tf_choice], top_n)
+    raw = get_broad_signal(market, tf_map[tf_choice], top_n)
     
-    # 🔹 [수정] raw 데이터가 None이거나 비어있을 경우 처리
     if not raw:
-        st.warning("현재 선택하신 조건(타임프레임/범위)에서 'Buy' 신호가 뜬 종목이 없습니다.")
+        st.warning("신호를 찾을 수 없습니다.")
     else:
         results = []
-        status_map = {2: "Strong Buy", 1: "Buy", 0: "Neutral", -1: "Sell", -2: "Strong Sell"}
-        
         for item in raw:
             d = item.get('d', [])
-            # 🔹 [에러 방지] 데이터 형식이 맞지 않거나 누락된 경우 건너뜀
-            if len(d) < 4 or d[0] is None: continue
-            
+            # 🔹 차트에 Buy가 떠 있는 종목들을 우선적으로 보여줍니다.
             results.append({
                 "종목명": d[3],
-                "현재 신호": status_map.get(int(d[0]), "Unknown"),
-                "현재가": f"{d[1]:,.0f}" if d[1] > 100 else f"{d[1]:,.2f}",
-                "볼밴 하단": f"{d[2]:,.0f}" if d[2] else "N/A"
+                "현재가": f"{d[1]:,.1f}",
+                "볼밴 하단": f"{d[2]:,.1f}" if d[2] else "N/A"
             })
 
         if results:
-            st.table(pd.DataFrame(results))
-            st.success(f"차트 신호가 확인된 {len(results)}개 종목입니다.")
-        else:
-            st.warning("조건에 맞는 신호를 찾지 못했습니다.")
+            df = pd.DataFrame(results)
+            st.table(df)
+            st.success(f"차트 신호 확인용 종목 {len(results)}개를 나열했습니다.")
