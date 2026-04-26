@@ -12,14 +12,11 @@ st.set_page_config(page_title="글로벌 자산 스캐너", page_icon="💰", la
 st.title("💰 글로벌 주식 & 코인 매수신호 스캐너")
 st.markdown("전 세계 주식과 업비트 코인을 분석하여 **볼린저 밴드 하단 돌파** 종목을 찾습니다.")
 
-# --- 세션 상태 초기화 ---
 if 'found_data' not in st.session_state:
     st.session_state.found_data = []
 
-# 사이드바 설정
 with st.sidebar:
     st.header("🔍 검색 설정")
-    # 국내주식은 yfinance 티커(005930.KS 등)로 처리 가능하므로 대상을 명확히 분리
     market = st.selectbox("대상 선택", ["업비트 코인 (원화마켓)", "미국주식 (대형주)", "국내주식 (삼성/SK 등)"])
     timeframe = st.selectbox("타임프레임", ["일봉", "주봉", "월봉"])
     start_button = st.button("🚀 분석 시작", use_container_width=True)
@@ -36,35 +33,39 @@ def get_upbit_candles(market, unit):
 
 def check_signal(close_series):
     if len(close_series) < 20: return None
-    # 20일 이동평균선 및 표준편차 계산
     ma20 = close_series.rolling(window=20).mean()
     std = close_series.rolling(window=20).std()
     lower_band = ma20 - (std * 2)
-    
-    curr, prev = close_series.iloc[-1], close_series.iloc[-2]
+    curr = close_series.iloc[-1]
     lower = lower_band.iloc[-1]
-    
-    # 🔹 하단 돌파 신호: 전날은 아래에 있다가 오늘 위로 올라오거나 하단선 근처일 때
-    if curr <= lower * 1.01: # 하단선 1% 이내 근접 포함
+    if curr <= lower * 1.01:
         return curr
     return None
 
 if start_button:
     st.session_state.found_data = []
+    
+    # 🔹 실시간 상태 표시를 위한 영역 확보
+    status_area = st.empty() 
+    progress_bar = st.progress(0)
     results_container = st.container()
     
     if "업비트" in market:
-        markets = [m for m in requests.get("https://api.upbit.com/v1/market/all").json() if m['market'].startswith('KRW-')]
-        tickers = markets # 업비트 데이터 사용
+        tickers = [m for m in requests.get("https://api.upbit.com/v1/market/all").json() if m['market'].startswith('KRW-')]
     elif "미국" in market:
-        tickers = ["AAPL", "MSFT", "NVDA", "TSLA", "GOOGL", "AMZN", "META"] # 대형주 예시
+        tickers = ["AAPL", "MSFT", "NVDA", "TSLA", "GOOGL", "AMZN", "META", "NFLX", "AMD", "PYPL"]
     else:
-        tickers = ["005930.KS", "000660.KS", "035420.KS", "035720.KS"] # 국내 대형주 예시
+        tickers = ["005930.KS", "000660.KS", "035420.KS", "035720.KS", "005380.KS", "000270.KS"]
 
-    progress_bar = st.progress(0)
-    
     for i, t in enumerate(tickers):
-        progress_bar.progress((i + 1) / len(tickers))
+        # 🔹 진행률 계산 및 실시간 텍스트 업데이트
+        prog = (i + 1) / len(tickers)
+        progress_bar.progress(prog)
+        
+        # 종목명 추출
+        t_name = t['korean_name'] if isinstance(t, dict) else t
+        status_area.markdown(f"🔍 **현재 분석 중:** `{t_name}` ({i+1}/{len(tickers)})")
+        
         try:
             if "업비트" in market:
                 prices = get_upbit_candles(t['market'], time_map[timeframe])
@@ -73,7 +74,6 @@ if start_button:
                 inter, per = yf_time_map[timeframe]
                 data = yf.download(t, interval=inter, period=per, progress=False)
                 if data.empty: continue
-                # Multi-index 이슈 대응
                 prices = data['Close'].iloc[:, 0] if isinstance(data['Close'], pd.DataFrame) else data['Close']
                 name = t
             
@@ -82,9 +82,11 @@ if start_button:
                 with results_container:
                     st.success(f"✅ **{name}** 포착! 현재가: {price:,.2f}")
                 st.session_state.found_data.append({"시간": datetime.now().strftime('%H:%M'), "종목": name, "현재가": price})
-            time.sleep(0.1)
+            
+            time.sleep(0.05) # 속도와 안정성 사이의 타협
         except: continue
+    
+    status_area.info("✅ 모든 분석이 완료되었습니다!")
 
-# --- 결과 출력 (생략된 기존 다운로드 로직 동일) ---
 if st.session_state.found_data:
     st.table(pd.DataFrame(st.session_state.found_data))
