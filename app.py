@@ -122,8 +122,14 @@ if start_button:
     else:
         is_kr = "국내" in market
         if is_kr:
-            stock_list = fdr.StockListing('KRX')
-            tickers = [row['Code'] + ('.KS' if row['Market'] == 'KOSPI' else '.KQ') for _, row in stock_list.iterrows()]
+           try:
+    kospi = fdr.StockListing('KOSPI')
+    kosdaq = fdr.StockListing('KOSDAQ')
+    stock_list = pd.concat([kospi, kosdaq])
+    tickers = [row['Code'] + ('.KS' if row['Market'] == 'KOSPI' else '.KQ') for _, row in stock_list.iterrows()]
+except Exception as e:
+    st.error(f"종목 리스트를 불러오는 중 오류가 발생했습니다: {e}")
+    tickers = [] # 리스트를 비워 다음 단계에서 에러 방지
         else:
             stock_list = pd.concat([fdr.StockListing('NASDAQ'), fdr.StockListing('NYSE')])
             tickers = stock_list['Symbol'].dropna().unique().tolist()
