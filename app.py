@@ -2,90 +2,85 @@ import streamlit as st
 import requests
 import pandas as pd
 
-st.set_page_config(page_title="Global Market Scanner", layout="wide")
-st.title("📊 통합 마켓 스캐너 (Double BB 전략)")
+# 1. 화면 구성 (깔끔하게)
+st.set_page_config(page_title="왕초보용 필승 스캐너", layout="wide")
+st.title("🚀 돈 되는 우량주 스캐너 (Double BB 전략)")
 
-# --- 사이드바 설정 ---
+# 2. 왼쪽 메뉴 설정
 with st.sidebar:
-    st.header("⚙️ 스캔 설정")
-    # 1. 시장 선택
-    market_choice = st.selectbox("대상 시장", ["업비트 코인", "국내주식 (KRX)", "미국주식 (NASDAQ/NYSE)"])
+    st.header("🔍 어디를 찾을까요?")
+    market = st.selectbox("시장 선택", ["업비트 코인", "국내주식 (삼성전자 등)", "미국주식 (애플/테슬라)"])
+    timeframe = st.selectbox("시간 간격", ["월봉 (길게 보기)", "주봉", "일봉", "4시간봉", "1시간봉", "5분봉"])
     
-    # 2. 타임프레임 (5분 ~ 월)
+    # 시간 간격 변환
     tf_map = {"5분봉": "5", "1시간봉": "60", "4시간봉": "240", "일봉": "", "주봉": "1W", "월봉": "1M"}
-    selected_tf = st.selectbox("타임프레임", list(tf_map.keys()), index=5)
-    interval = tf_map[selected_tf]
+    interval = tf_map[timeframe]
 
-    # 3. 시가총액 순위 및 필터
-    top_n = st.slider("스캔 대상 (시총 상위 N개)", 50, 500, 100)
-    
-    per_limit = 100.0
-    if "국내주식" in market_choice:
-        per_limit = st.number_input("최대 PER (이하만 추출)", value=15.0)
+    # 국내주식일 때만 PER(저평가) 설정 보이기
+    per_val = 15.0
+    if "국내주식" in market:
+        per_val = st.number_input("PER 15 이하만 보기 (저평가 종목)", value=15.0)
 
     st.divider()
-    start_btn = st.button("🚀 전체 시장 스캔 시작", use_container_width=True)
+    btn = st.button("🚀 종목 찾아내기!", use_container_width=True)
 
-def get_market_data(market, interval, limit, per_val):
-    # 시장별 API 설정
-    m_cfg = {
-        "업비트 코인": {"url": "https://scanner.tradingview.com/crypto/scan", "m": "crypto"},
-        "국내주식 (KRX)": {"url": "https://scanner.tradingview.com/korea/scan", "m": "korea"},
-        "미국주식 (NASDAQ/NYSE)": {"url": "https://scanner.tradingview.com/america/scan", "m": "america"}
+# 3. 실제 데이터 가져오는 로직 (에러 방지 강화)
+def fetch_data(market_name, itv, p_filter):
+    url_map = {
+        "업비트 코인": "https://scanner.tradingview.com/crypto/scan",
+        "국내주식 (삼성전자 등)": "https://scanner.tradingview.com/korea/scan",
+        "미국주식 (애플/테슬라)": "https://scanner.tradingview.com/america/scan"
     }
-    cfg = m_cfg[market]
+    m_type = {"업비트 코인": "crypto", "국내주식 (삼성전자 등)": "korea", "미국주식 (애플/테슬라)": "america"}
     
-    # 기본 컬럼 구성
-    cols = ["close", "BB.lower", "low", "market_cap_basic", "description"]
-    if "국내주식" in market: cols.append("price_earnings_ttm") # PER 추가
+    # 가져올 항목들
+    cols = ["close", "BB.lower", "low", "market_cap_basic", "description", "name"]
+    if "국내주식" in market_name: cols.append("price_earnings_ttm")
 
-    # 타임프레임 적용 컬럼 생성
-    actual_cols = [f"{c}|{interval}" if (interval and c not in ["description", "market_cap_basic", "price_earnings_ttm"]) else c for c in cols]
+    # 타임프레임 적용
+    final_cols = [f"{c}|{itv}" if itv and c not in ["description", "name", "market_cap_basic", "price_earnings_ttm"] else c for c in cols]
 
     payload = {
         "filter": [],
-        "options": {"lang": "ko"},
-        "markets": [cfg["m"]],
-        "symbols": {"query": {"types": []}, "tickers": []},
-        "columns": actual_cols,
-        "sort": {"column": "market_cap_basic", "direction": "desc"}, # 시총 순 정렬
-        "range": [0, limit]
+        "markets": [m_type[market_name]],
+        "columns": final_cols,
+        "sort": {"column": "market_cap_basic", "direction": "desc"}, # 큰 회사부터
+        "range": [0, 100] # 상위 100개 검사
     }
     
-    if "국내주식" in market:
-        payload["filter"].append({"left": "price_earnings_ttm", "operation": "less", "right": per_val})
+    if "국내주식" in market_name:
+        payload["filter"].append({"left": "price_earnings_ttm", "operation": "less", "right": p_filter})
 
     try:
-        res = requests.post(cfg["url"], json=payload, timeout=15).json()
-        return res.get('data', [])
+        r = requests.post(url_map[market_name], json=payload).json()
+        return r.get('data', [])
     except:
         return []
 
-if start_btn:
-    st.write(f"### 🔎 {market_choice} ({selected_tf}) 분석 결과")
-    data = get_market_data(market_choice, interval, top_n, per_limit)
+# 4. 화면 출력
+if btn:
+    st.write(f"### 🎯 {market}에서 찾아낸 대박 후보")
+    raw = fetch_data(market, interval, per_val)
     
-    found = []
-    for item in data:
+    results = []
+    for item in raw:
         d = item['d']
-        if None in d[:3]: continue # 필수 데이터 누락 시 스킵
+        if d[0] is None or d[1] is None: continue # 데이터 없으면 패스
         
-        curr_c, bb_low, curr_l, mcap, desc = d[0], d[1], d[2], d[3], d[4]
-        
-        # 🎯 전략 판정 (저가 <= 하단선 * 1.02 AND 현재가 > 하단선)
-        if curr_c > bb_low and curr_l <= bb_low * 1.02:
-            res_dict = {
-                "종목명": desc,
-                "현재가": f"{curr_c:,.2f}" if curr_c < 1000 else f"{curr_c:,.0f}",
-                "1번 하단선": f"{bb_low:,.0f}",
-                "시가총액": f"{mcap/100000000:,.0f}억" if mcap else "N/A"
+        # 현재가 > 하단선 이고 저가 < 하단선(2% 유격) 인 것만!
+        if d[0] > d[1] and d[2] <= d[1] * 1.02:
+            row = {
+                "이름": d[4] if d[4] else d[5],
+                "현재가격": f"{d[0]:,.0f}원" if d[0] > 100 else f"{d[0]:.2f}$",
+                "하단선": f"{d[1]:,.0f}",
+                "시가총액": f"{d[3]/100000000:,.0f}억" if d[3] else "정보없음"
             }
-            if "국내주식" in market_choice:
-                res_dict["PER"] = round(d[5], 2) if d[5] else "N/A"
-            found.append(res_dict)
+            if "국내주식" in market:
+                row["PER(저평가)"] = round(d[6], 1) if d[6] else "N/A"
+            results.append(row)
 
-    if found:
-        st.success(f"{len(found)}개 종목 포착!")
-        st.table(pd.DataFrame(found))
+    if results:
+        st.table(pd.DataFrame(results))
+        st.success(f"현재 조건에 딱 맞는 종목 {len(results)}개를 찾았습니다!")
     else:
-        st.warning("조건에 맞는 종목이 없습니다. 설정을 변경해 보세요.")
+        st.warning("지금은 조건에 맞는 종목이 없네요. 시간 간격을 '일봉'이나 '주봉'으로 바꿔보세요!")
