@@ -1,6 +1,6 @@
 streamlit
-FinanceDataReader
 yfinance
+FinanceDataReader
 pandas
 requests
 openpyxl
