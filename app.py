@@ -1,64 +1,69 @@
 import streamlit as st
-import yfinance as yf
+import requests
 import pandas as pd
-import datetime
 
-st.set_page_config(page_title="Bollinger Band Scanner", layout="wide")
-st.title("📊 야후 파이낸스 기반 볼밴 하단 스캐너")
+st.set_page_config(page_title="Signal Sync Scanner", layout="wide")
+st.title("🎯 트레이딩뷰 '신호 일치' 스캐너")
 
 with st.sidebar:
-    st.header("⚙️ 설정")
-    target_market = st.selectbox("대상 시장", ["코인 (BTC/ETH 등)", "미국 주식"])
-    period = st.selectbox("데이터 기간", ["1y", "2y", "5y"])
-    interval = st.selectbox("봉 단위 (타임프레임)", ["1mo", "1wk", "1d"])
+    st.header("⚙️ 필터 설정")
+    market = st.selectbox("시장", ["업비트 코인", "국내주식", "미국주식"])
+    tf_choice = st.selectbox("타임프레임", ["월봉", "주봉", "일봉", "4시간봉"])
     
-    st.info("야후 파이낸스 데이터를 직접 계산하여 하단 돌파 종목을 찾습니다.")
-    start_btn = st.button("🚀 스캔 시작")
+    # 시가총액 상위 범위
+    top_n = st.slider("스캔 범위 (상위 N개)", 50, 500, 100, step=50)
+    
+    tf_map = {"월봉": "1M", "주봉": "1W", "일봉": "", "4시간봉": "240"}
+    st.info("선택한 타임프레임에서 '매수' 신호가 있는 종목을 찾습니다.")
+    
+    start_btn = st.button("🚀 스캔 시작", use_container_width=True)
 
-# 코인 리스트 (야후 파이낸스 티커 기준)
-COIN_TICKERS = [
-    "BTC-USD", "ETH-USD", "BCH-USD", "SOL-USD", "XRP-USD", 
-    "ADA-USD", "DOGE-USD", "DOT-USD", "MATIC-USD", "TRX-USD",
-    "AVAX-USD", "SHIB-USD", "LINK-USD", "NEAR-USD", "UNI-USD"
-]
+def get_tradingview_data(m_name, itv, limit):
+    url_map = {"업비트 코인": "crypto", "국내주식": "korea", "미국주식": "america"}
+    api_url = f"https://scanner.tradingview.com/{url_map[m_name]}/scan"
+    
+    # 기본 지표 데이터 요청
+    cols = ["Recommend.All", "close", "BB.lower", "description", "name"]
+    actual_cols = [f"{c}|{itv}" if itv and c not in ["description", "name"] else c for c in cols]
 
-# 미국 주식 리스트 (시총 상위 예시)
-STOCK_TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META", "BRK-B", "UNH", "V"]
+    payload = {
+        "filter": [],
+        "markets": [url_map[m_name]],
+        "columns": actual_cols,
+        "sort": {"column": "market_cap_basic", "direction": "desc"},
+        "range": [0, limit]
+    }
+    
+    # 업비트 종목만 필터링
+    if m_name == "업비트 코인":
+        payload["filter"].append({"left": "name", "operation": "match", "right": "KRW"})
 
-def calculate_bb(ticker, p, i):
     try:
-        df = yf.download(ticker, period=p, interval=i, progress=False)
-        if df.empty: return None
-        
-        # 볼린저 밴드 계산 (20일 표준)
-        df['MA20'] = df['Close'].rolling(window=20).mean()
-        df['STD'] = df['Close'].rolling(window=20).std()
-        df['Upper'] = df['MA20'] + (df['STD'] * 2)
-        df['Lower'] = df['MA20'] - (df['STD'] * 2)
-        
-        last_row = df.iloc[-1]
-        return {
-            "Symbol": ticker,
-            "Price": round(float(last_row['Close']), 2),
-            "Lower": round(float(last_row['Lower']), 2),
-            "Status": "하단 돌파" if last_row['Close'] <= last_row['Lower'] else "근접"
-        }
+        res = requests.post(api_url, json=payload, timeout=10).json()
+        return res.get('data', [])
     except:
-        return None
+        return []
 
 if start_btn:
-    tickers = COIN_TICKERS if target_market == "코인 (BTC/ETH 등)" else STOCK_TICKERS
+    raw = get_tradingview_data(market, interval := tf_map[tf_choice], top_n)
     results = []
     
-    with st.spinner("데이터 분석 중..."):
-        for t in tickers:
-            res = calculate_bb(t, period, interval)
-            if res:
-                results.append(res)
-    
+    for item in raw:
+        d = item['d']
+        if None in d[:3]: continue
+        
+        # 추천 점수가 0보다 크면(매수권) 리스트에 추가
+        if d[0] > 0:
+            results.append({
+                "종목명": d[3],
+                "신호 강도": "Strong Buy" if d[0] > 0.5 else "Buy",
+                "현재가": f"{d[1]:,.0f}" if d[1] > 100 else f"{d[1]:,.2f}",
+                "볼밴 하단": f"{d[2]:,.0f}" if d[2] else "N/A"
+            })
+
     if results:
-        df_res = pd.DataFrame(results)
-        st.table(df_res)
-        st.success("스캔이 완료되었습니다.")
+        df = pd.DataFrame(results)
+        st.table(df)
+        st.success(f"조건에 맞는 종목 {len(results)}개를 찾았습니다.")
     else:
-        st.error("데이터를 가져오지 못했습니다.")
+        st.warning("현재 매수 신호가 있는 종목이 없습니다.")
