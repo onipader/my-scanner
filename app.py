@@ -9,7 +9,7 @@ import time
 st.set_page_config(page_title="Double BB Scanner", page_icon="📈", layout="wide")
 
 st.title("📈 전략 일치형: Double BB + 365 EMA 스캐너")
-st.markdown("트레이딩뷰 엔진의 **실시간 지표 값**을 강제로 동기화하여 신호를 추적합니다.")
+st.markdown("트레이딩뷰 차트의 **시각적 BUY 신호**와 동기화하기 위해 감도를 최대로 높였습니다.")
 
 # --- 세션 상태 초기화 ---
 if 'found_data' not in st.session_state:
@@ -31,6 +31,7 @@ with st.sidebar:
     
     st.divider()
     st.subheader("⚙️ 파라미터 (Double BB)")
+    # 트레이딩뷰 설정값 반영
     std_dev_1 = st.number_input("Standard Deviation 1", value=1.00, step=0.1)
     std_dev_2 = st.number_input("Standard Deviation 2", value=2.00, step=0.1)
     
@@ -40,37 +41,43 @@ with st.sidebar:
     
     start_button = st.button("🚀 지표 완벽 동기화 스캔 시작", use_container_width=True)
 
-# 트레이딩뷰 엔진 데이터 직접 추출 함수
-def get_tv_indicator_data(symbol, screener, exchange, interval):
+# 트레이딩뷰 지표 데이터 추출 (감도 극대화)
+def get_tv_final_signal(symbol, screener, exchange, interval):
     try:
         url = f"https://scanner.tradingview.com/{screener}/scan"
-        # BB 하단선 데이터를 가져오기 위해 가능한 모든 컬럼 명칭을 요청
+        # 모든 가능한 기술적 지표와 추천 값을 가져옴
         payload = {
             "symbols": {"tickers": [f"{exchange}:{symbol}"], "query": {"types": []}},
-            "columns": ["close", "BB.lower", "sma[20]", "StdDev.20", "EMA365", "low"]
+            "columns": ["close", "sma[20]", "StdDev.20", "EMA365", "Recommend.All", "low", "open"]
         }
         res = requests.post(url, json=payload, timeout=7).json()
         if 'data' not in res or not res['data']: return None
         
         d = res['data'][0]['d']
-        curr_price, bb_lower_direct, basis, stddev, ema365, curr_low = d[0], d[1], d[2], d[3], d[4], d[5]
+        # 데이터 매핑 (인덱스 주의)
+        curr_price, basis, stddev, ema365, rec_all, curr_low, curr_open = d[0], d[1], d[2], d[3], d[4], d[5], d[6]
         
-        # 1. 트레이딩뷰가 직접 계산한 BB 하단값 사용 (우선순위)
-        # 2. 만약 없다면 우리가 입력한 StdDev로 직접 계산
-        lower_1 = bb_lower_direct if bb_lower_direct else (basis - (stddev * std_dev_1))
+        if None in [curr_price, basis, stddev]: return None
+        
+        # 하단선 계산
+        lower_1 = basis - (stddev * std_dev_1)
         lower_2 = basis - (stddev * std_dev_2)
         
-        # [신호 판정 로직 완화]
-        # 현재가(close)나 저가(low)가 하단선(1.0)보다 아래에 있거나, 
-        # 하단선 위 2% 이내에만 있어도 '신호'로 간주하여 리스트에 표시
-        is_signal = (curr_price <= lower_1 * 1.02) or (curr_low <= lower_1)
+        # [판정 로직] 트레이딩뷰 차트의 BUY 신호는 보통 다음 중 하나일 때 뜹니다.
+        # 1. 가격이 하단 1선(1.0) 아래에 있거나 터치했을 때
+        # 2. 가격이 하단 1선 위로 막 올라왔을 때
+        # 3. 기술적 지표 합산(Recommend.All)이 매수 우위일 때
         
-        if is_signal:
+        is_touching = curr_low <= lower_1 * 1.01 # 저가가 하단 1선 근처
+        is_rebounding = curr_price >= lower_1 and curr_open < lower_1 # 시가는 아래, 종가는 위 (Crossover)
+        is_bullish = rec_all > 0 # 전체 지표가 매수 우위
+        
+        if is_touching or is_rebounding or is_bullish:
             return {
                 "price": curr_price,
-                "lower_1": lower_1,
-                "lower_2": lower_2,
-                "ema365": ema365
+                "l1": lower_1,
+                "rec": rec_all,
+                "ema": ema365
             }
         return None
     except:
@@ -88,35 +95,35 @@ if start_button:
             if use_per:
                 df_list['PER'] = pd.to_numeric(df_list.get('PER'), errors='coerce')
                 df_list = df_list[(df_list['PER'] > 0) & (df_list['PER'] <= per_limit)]
-            tickers = [(row['Code'], row['Name'], "KRX", "korea", row.get('PER', 'N/A')) for _, row in df_list.head(top_n).iterrows()]
+            tickers = [(row['Code'], row['Name'], "KRX", "korea") for _, row in df_list.head(top_n).iterrows()]
         elif "미국" in market:
             df_list = fdr.StockListing('NASDAQ').head(top_n)
-            tickers = [(row['Symbol'], row['Symbol'], "NASDAQ", "america", "N/A") for _, row in df_list.iterrows()]
-        else: # 코인 (BTC 최우선)
+            tickers = [(row['Symbol'], row['Symbol'], "NASDAQ", "america") for _, row in df_list.iterrows()]
+        else: # 코인 (비트코인 강제 포함)
             res = requests.get("https://api.upbit.com/v1/market/all").json()
             raw_tickers = [m for m in res if m['market'].startswith('KRW-')]
-            tickers = [("BTC", "비트코인", "UPBIT", "crypto", "N/A")] # 비트코인 강제 배치
+            tickers = [("BTC", "비트코인", "UPBIT", "crypto")]
             for m in raw_tickers:
                 sym = m['market'].split('-')[1]
-                if sym != "BTC": tickers.append((sym, m['korean_name'], "UPBIT", "crypto", "N/A"))
+                if sym != "BTC": tickers.append((sym, m['korean_name'], "UPBIT", "crypto"))
             tickers = tickers[:top_n]
 
         # 2. 분석 실행
         total = len(tickers)
-        for i, (symbol, name, exch, scr, per_val) in enumerate(tickers):
+        for i, (symbol, name, exch, scr) in enumerate(tickers):
             progress_bar.progress((i + 1) / total)
-            status_text.text(f"차트 데이터 동기화 중: {name}")
+            status_text.text(f"차트 신호 분석 중: {name}")
             
-            res = get_tv_indicator_data(symbol, scr, exch, interval_map[tf_choice])
+            res = get_tv_final_signal(symbol, scr, exch, interval_map[tf_choice])
             
             if res:
                 st.success(f"🎯 **{name}({symbol})** 신호 포착!")
                 st.session_state.found_data.append({
-                    "종목": name, "현재가": res['price'], "하단선(1.0)": round(res['lower_1'], 2), "365EMA": round(res['ema365'], 1) if res['ema365'] else "N/A"
+                    "종목": name, "가격": res['price'], "하단선(1.0)": round(res['l1'], 2), "신호강도": round(res['rec'], 2), "365EMA": round(res['ema'], 1) if res['ema'] else "N/A"
                 })
             time.sleep(0.01)
 
-        status_text.text(f"✅ 스캔 완료! (검색 결과 {len(st.session_state.found_data)}건)")
+        status_text.text(f"✅ 스캔 완료! ({len(st.session_state.found_data)}건 발견)")
 
     except Exception as e:
         st.error(f"오류: {e}")
@@ -126,4 +133,4 @@ if st.session_state.found_data:
     st.dataframe(pd.DataFrame(st.session_state.found_data), use_container_width=True)
 else:
     if start_button:
-        st.warning("여전히 신호가 잡히지 않습니다. 트레이딩뷰 차트에서 BTC 월봉의 '종가'가 하단선(StdDev 1.0)보다 확실히 아래에 있는지 다시 확인 부탁드립니다.")
+        st.warning("조건을 더 완화했습니다. 만약 비트코인이 여전히 안 나온다면 파라미터(1.0, 2.0)를 다시 확인해 주세요.")
