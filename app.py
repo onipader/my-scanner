@@ -9,7 +9,7 @@ import time
 st.set_page_config(page_title="Double BB Scanner", page_icon="📈", layout="wide")
 
 st.title("📈 전략 일치형: Double BB + 365 EMA 스캐너")
-st.markdown("트레이딩뷰 차트의 **시각적 BUY 신호**를 강제로 찾아내는 최적화 버전입니다.")
+st.markdown("차트에 **BUY** 표시가 있다면 무조건 찾아내도록 **'최근 신호 추적'** 로직을 적용했습니다.")
 
 # --- 세션 상태 초기화 ---
 if 'found_data' not in st.session_state:
@@ -39,43 +39,63 @@ with st.sidebar:
     
     start_button = st.button("🚀 전략 스캔 시작", use_container_width=True)
 
-# 트레이딩뷰 지표 계산 함수 (감도 극대화)
+# 트레이딩뷰 지표 계산 함수 (과거 봉 추적 로직 추가)
 def get_tv_strategy_data(symbol, screener, exchange, interval):
     try:
         url = f"https://scanner.tradingview.com/{screener}/scan"
-        # 차트 신호와 일치시키기 위해 필요한 더 많은 지표들
+        # 현재 봉(0), 직전 봉(1), 전전 봉(2) 데이터를 모두 가져옴
         payload = {
             "symbols": {"tickers": [f"{exchange}:{symbol}"], "query": {"types": []}},
-            "columns": ["close", "sma[20]", "StdDev.20", "close[1]", "low", "EMA365"]
+            "columns": [
+                "close", "sma[20]", "StdDev.20", # 현재
+                "close[1]", "sma[20][1]", "StdDev.20[1]", # 1봉 전
+                "close[2]", "sma[20][2]", "StdDev.20[2]", # 2봉 전
+                "EMA365"
+            ]
         }
         res = requests.post(url, json=payload, timeout=7).json()
         if 'data' not in res or not res['data']: return None
         
         d = res['data'][0]['d']
-        curr_close, basis, stddev_20, prev_close, curr_low, ema365 = d[0], d[1], d[2], d[3], d[4], d[5]
         
-        if None in [curr_close, basis, stddev_20]: return None
-        
-        # 1표준편차 하단선
-        lower_band_1 = basis - (stddev_20 * std_dev_1) 
-        
-        # [강력 보정 로직]
-        # 1. 현재 종가가 하단선 근처인가 (1.5% 범위까지 대폭 확대)
-        is_at_bottom = curr_close <= lower_band_1 * 1.015
-        
-        # 2. 현재 봉의 저가(Low)가 하단선을 터치했는가 (꼬리 달고 올라오는 신호)
-        is_low_touch = curr_low <= lower_band_1
-        
-        # 3. 전 봉 대비 골든크로스 발생 중인가
-        is_crossover = (prev_close is not None) and (prev_close <= lower_band_1 and curr_close > lower_band_1)
-        
-        # 위 조건 중 하나라도 맞으면 '차트상 신호 발생 가능성'으로 간주
-        if is_at_bottom or is_low_touch or is_crossover:
+        # 데이터 정리 (현재, 1봉전, 2봉전)
+        closes = [d[0], d[3], d[6]]
+        basises = [d[1], d[4], d[7]]
+        stddevs = [d[2], d[5], d[8]]
+        ema365 = d[9]
+
+        # 3개 봉 이내에 crossover(교차)가 있었는지 확인
+        is_buy_signal = False
+        signal_age = 0 # 0이면 현재봉, 1이면 직전봉...
+
+        for i in range(2): # 0(현재)과 1(직전)을 검사하여 교차 지점 확인
+            curr_c = closes[i]
+            prev_c = closes[i+1]
+            curr_basis = basises[i]
+            curr_std = stddevs[i]
+            
+            if None in [curr_c, prev_c, curr_basis, curr_std]: continue
+            
+            # 해당 시점의 하단선
+            l_band = curr_basis - (curr_std * std_dev_1)
+            
+            # 교차 발생 여부 (ta.crossover 로직)
+            if prev_c <= l_band and curr_c > l_band:
+                is_buy_signal = True
+                signal_age = i
+                break
+            
+            # 혹은 현재가가 여전히 하단선 아래에 머물러 있는 경우 (Buy Zone)
+            if i == 0 and curr_c <= l_band:
+                is_buy_signal = True
+                signal_age = 99 # 구간 내 머무름 표시
+                break
+
+        if is_buy_signal:
             return {
-                "price": curr_close, 
-                "ema365": ema365, 
-                "l_band": lower_band_1,
-                "status": "BUY 신호 구간"
+                "price": closes[0],
+                "ema365": ema365,
+                "age": signal_age
             }
         return None
     except:
@@ -97,34 +117,32 @@ if start_button:
         elif "미국" in market:
             df_list = fdr.StockListing('NASDAQ').head(top_n)
             tickers = [(row['Symbol'], row['Symbol'], "NASDAQ", "america", "N/A") for _, row in df_list.iterrows()]
-        else: # 코인 (비트코인 무조건 포함)
+        else: # 코인 (비트코인 최우선)
             res = requests.get("https://api.upbit.com/v1/market/all").json()
             raw_tickers = [m for m in res if m['market'].startswith('KRW-')]
-            tickers = []
-            # 비트코인(BTC)을 강제로 맨 앞에 삽입
-            tickers.append(("BTC", "비트코인", "UPBIT", "crypto", "N/A"))
+            tickers = [("BTC", "비트코인", "UPBIT", "crypto", "N/A")] # BTC 강제 삽입
             for m in raw_tickers:
                 sym = m['market'].split('-')[1]
-                if sym != "BTC":
-                    tickers.append((sym, m['korean_name'], "UPBIT", "crypto", "N/A"))
+                if sym != "BTC": tickers.append((sym, m['korean_name'], "UPBIT", "crypto", "N/A"))
             tickers = tickers[:top_n]
 
         # 2. 분석 실행
         total = len(tickers)
         for i, (symbol, name, exch, scr, per_val) in enumerate(tickers):
             progress_bar.progress((i + 1) / total)
-            status_text.text(f"분석 중: {name} ({i+1}/{total})")
+            status_text.text(f"신호 추적 중: {name} ({i+1}/{total})")
             
             res = get_tv_strategy_data(symbol, scr, exch, interval_map[tf_choice])
             
             if res:
-                st.success(f"🎯 **{name}({symbol})** 포착!")
+                age_msg = "현재 봉 발생" if res['age'] == 0 else ("직전 봉 발생" if res['age'] == 1 else "매수 구간 내")
+                st.success(f"🎯 **{name}({symbol})** 신호 포착! ({age_msg})")
                 st.session_state.found_data.append({
-                    "종목": name, "심볼": symbol, "현재가": res['price'], "하단선": round(res['l_band'], 2), "상태": res['status']
+                    "종목": name, "심볼": symbol, "현재가": res['price'], "상태": age_msg, "PER": per_val
                 })
             time.sleep(0.01)
 
-        status_text.text(f"✅ {total}개 종목 스캔 완료!")
+        status_text.text(f"✅ 스캔 완료!")
 
     except Exception as e:
         st.error(f"오류: {e}")
@@ -134,4 +152,4 @@ if st.session_state.found_data:
     st.dataframe(pd.DataFrame(st.session_state.found_data), use_container_width=True)
 else:
     if start_button:
-        st.warning("조건에 맞는 종목이 없습니다. 차트의 BUY 신호 위치를 다시 확인해 주세요.")
+        st.warning("신호가 포착되지 않았습니다. 지표의 Standard Deviation 설정을 다시 확인해 주세요.")
