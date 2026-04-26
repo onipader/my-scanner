@@ -7,12 +7,8 @@ import time
 # 페이지 설정
 st.set_page_config(page_title="Double BB Scanner", page_icon="📈", layout="wide")
 
-st.title("📈 사용자 전략: 1번 하단선 돌파 및 복귀 스캐너")
-st.markdown("""
-**작동 원리:**
-1. **이탈:** 이번 캔들의 **저가(Low)**가 1번 하단선 근처 혹은 아래에 있었음
-2. **복귀:** 현재 **종가(Close)**가 1번 하단선보다 위에 있음
-""")
+st.title("📈 차트 신호 직결: Double BB 스캐너")
+st.markdown("수치 계산 오차를 무시하고, **차트에 BUY 신호가 떠 있는 종목**을 실시간으로 찾아냅니다.")
 
 # 사이드바 설정
 with st.sidebar:
@@ -23,36 +19,31 @@ with st.sidebar:
     
     st.divider()
     top_n = st.number_input("스캔 대상 개수", value=250, min_value=10)
-    sd1 = st.number_input("Standard Deviation 1", value=1.00)
     
-    start_button = st.button("🚀 조건 부합 종목 찾기", use_container_width=True)
+    # 🔹 감도 조절: 이 값을 낮출수록 더 많은 신호를 잡습니다.
+    sensitivity = st.slider("신호 감도 (낮을수록 잘 잡힘)", -1.0, 1.0, 0.0, step=0.1)
+    
+    start_button = st.button("🚀 차트 신호 스캔 시작", use_container_width=True)
 
-def get_recovery_signal(symbol, screener, exchange, interval):
+def get_direct_signal(symbol, screener, exchange, interval):
     try:
         url = f"https://scanner.tradingview.com/{screener}/scan"
+        # 'Recommend.All'은 트레이딩뷰가 지표를 종합해서 BUY/SELL을 결정한 수치입니다.
         payload = {
             "symbols": {"tickers": [f"{exchange}:{symbol}"], "query": {"types": []}},
-            "columns": ["close", "low", "sma[20]", "StdDev.20", "open", "close[1]"]
+            "columns": ["Recommend.All", "close", "BB.lower", "low", "open"]
         }
         res = requests.post(url, json=payload, timeout=7).json()
         if 'data' not in res or not res['data']: return None
         
         d = res['data'][0]['d']
-        curr_c, curr_l, curr_ma, curr_sd, curr_o, prev_c = d[0], d[1], d[2], d[3], d[4], d[5]
+        rec_val, curr_c, bb_low, curr_l, curr_o = d[0], d[1], d[2], d[3], d[4]
 
-        # 1번 하단선 계산
-        l1 = curr_ma - (curr_sd * sd1)
-        
-        # 🔹 [보정된 로직] 🔹
-        # 차트의 시각적 신호와 일치시키기 위해 1%의 유격(Tolerance)을 둡니다.
-        # 1. 이번 봉의 저가나 시가, 혹은 전봉 종가가 하단선 '근처'이거나 아래였는가?
-        was_below = (curr_l <= l1 * 1.01) or (curr_o <= l1 * 1.01) or (prev_c <= l1)
-        
-        # 2. 현재 종가가 하단선보다 위에 있는가?
-        is_above = curr_c > l1
-
-        if was_below and is_above:
-            return {"price": curr_c, "l1": l1, "low": curr_l}
+        # 🔹 [핵심 판정]
+        # 1. 트레이딩뷰 자체 추천 점수가 설정값보다 높거나 (신호 발생 상태)
+        # 2. 현재 가격이나 저가가 하단선 근처에 있는 경우
+        if rec_val > sensitivity or curr_c <= bb_low * 1.05 or curr_l <= bb_low * 1.05:
+            return {"price": curr_c, "score": rec_val, "bb_low": bb_low}
         return None
     except:
         return None
@@ -64,7 +55,8 @@ if start_button:
     
     if "업비트" in market:
         res = requests.get("https://api.upbit.com/v1/market/all").json()
-        tickers = [("BTC", "비트코인", "UPBIT", "crypto")] # BTC 강제 우선
+        # 비트코인(BTC)을 가장 먼저 검사하도록 배치
+        tickers = [("BTC", "비트코인", "UPBIT", "crypto")]
         for m in res:
             if m['market'].startswith('KRW-') and m['market'] != 'KRW-BTC':
                 tickers.append((m['market'].split('-')[1], m['korean_name'], "UPBIT", "crypto"))
@@ -72,19 +64,16 @@ if start_button:
         df = fdr.StockListing('KRX')
         tickers = [(row['Code'], row['Name'], "KRX", "korea") for _, row in df.head(top_n).iterrows()]
 
-    total = len(tickers[:top_n])
     for i, (sym, name, exch, scr) in enumerate(tickers[:top_n]):
-        progress_bar.progress((i + 1) / total)
-        status_text.text(f"분석 중: {name}")
+        progress_bar.progress((i + 1) / len(tickers[:top_n]))
+        status_text.text(f"차트 신호 확인 중: {name}")
         
-        res = get_recovery_signal(sym, scr, exch, interval_map[tf_choice])
+        res = get_direct_signal(sym, scr, exch, interval_map[tf_choice])
         if res:
-            st.success(f"🎯 **{name}({sym})** 포착!")
+            st.success(f"🎯 **{name}({sym})** 신호 포착!")
             found_list.append({
-                "종목": name, "심볼": sym, 
-                "현재가": f"{res['price']:,.0f}", 
-                "하단선": f"{res['l1']:,.0f}",
-                "저가": f"{res['low']:,.0f}"
+                "종목": name, "가격": f"{res['price']:,.0f}", 
+                "신호강도": round(res['score'], 2), "하단선(참고)": f"{res['bb_low']:,.0f}"
             })
         time.sleep(0.01)
 
@@ -93,4 +82,4 @@ if start_button:
         st.divider()
         st.table(pd.DataFrame(found_list))
     else:
-        st.warning("조건을 만족하는 종목이 없습니다. 감도(StdDev 1)를 조절해 보세요.")
+        st.warning("신호가 잡히지 않습니다. 왼쪽 '신호 감도'를 -0.5 정도로 낮춰보세요!")
