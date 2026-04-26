@@ -1,69 +1,142 @@
 import streamlit as st
-import requests
+import FinanceDataReader as fdr
+import yfinance as yf
 import pandas as pd
+import time
+import requests
+from datetime import datetime
+import io
 
-st.set_page_config(page_title="Signal Sync Scanner", layout="wide")
-st.title("🎯 트레이딩뷰 '신호 일치' 스캐너")
+# 페이지 설정
+st.set_page_config(page_title="글로벌 자산 스캐너", page_icon="💰", layout="wide")
 
+st.title("💰 글로벌 주식 & 코인 매수신호 스캐너")
+st.markdown("전 세계 주식과 업비트 코인을 분석하여 **볼린저 밴드 하단 돌파** 종목을 찾습니다.")
+
+# --- 세션 상태 초기화 (데이터 유지용) ---
+if 'found_data' not in st.session_state:
+    st.session_state.found_data = []
+
+# 사이드바 설정
 with st.sidebar:
-    st.header("⚙️ 필터 설정")
-    market = st.selectbox("시장", ["업비트 코인", "국내주식", "미국주식"])
-    tf_choice = st.selectbox("타임프레임", ["월봉", "주봉", "일봉", "4시간봉"])
-    
-    # 시가총액 상위 범위
-    top_n = st.slider("스캔 범위 (상위 N개)", 50, 500, 100, step=50)
-    
-    tf_map = {"월봉": "1M", "주봉": "1W", "일봉": "", "4시간봉": "240"}
-    st.info("선택한 타임프레임에서 '매수' 신호가 있는 종목을 찾습니다.")
-    
-    start_btn = st.button("🚀 스캔 시작", use_container_width=True)
+    st.header("🔍 검색 설정")
+    market = st.selectbox("대상 선택", ["국내주식 (KOSPI/KOSDAQ)", "미국주식 (NASDAQ/NYSE)", "업비트 코인 (원화마켓)"])
+    timeframe = st.selectbox("타임프레임", ["5분봉", "1시간봉", "일봉", "주봉", "월봉"])
+    start_button = st.button("🚀 분석 시작", use_container_width=True)
 
-def get_tradingview_data(m_name, itv, limit):
-    url_map = {"업비트 코인": "crypto", "국내주식": "korea", "미국주식": "america"}
-    api_url = f"https://scanner.tradingview.com/{url_map[m_name]}/scan"
-    
-    # 기본 지표 데이터 요청
-    cols = ["Recommend.All", "close", "BB.lower", "description", "name"]
-    actual_cols = [f"{c}|{itv}" if itv and c not in ["description", "name"] else c for c in cols]
+# 시간 매핑
+time_map = {"5분봉":"5", "1시간봉":"60", "일봉":"day", "주봉":"week", "월봉":"month"}
+yf_time_map = {"5분봉":("5m","1d"), "1시간봉":("60m","1w"), "일봉":("1d","1y"), "주봉":("1wk","2y"), "월봉":("1mo","5y")}
 
-    payload = {
-        "filter": [],
-        "markets": [url_map[m_name]],
-        "columns": actual_cols,
-        "sort": {"column": "market_cap_basic", "direction": "desc"},
-        "range": [0, limit]
-    }
-    
-    # 업비트 종목만 필터링
-    if m_name == "업비트 코인":
-        payload["filter"].append({"left": "name", "operation": "match", "right": "KRW"})
-
-    try:
-        res = requests.post(api_url, json=payload, timeout=10).json()
-        return res.get('data', [])
-    except:
-        return []
-
-if start_btn:
-    raw = get_tradingview_data(market, interval := tf_map[tf_choice], top_n)
-    results = []
-    
-    for item in raw:
-        d = item['d']
-        if None in d[:3]: continue
-        
-        # 추천 점수가 0보다 크면(매수권) 리스트에 추가
-        if d[0] > 0:
-            results.append({
-                "종목명": d[3],
-                "신호 강도": "Strong Buy" if d[0] > 0.5 else "Buy",
-                "현재가": f"{d[1]:,.0f}" if d[1] > 100 else f"{d[1]:,.2f}",
-                "볼밴 하단": f"{d[2]:,.0f}" if d[2] else "N/A"
-            })
-
-    if results:
-        df = pd.DataFrame(results)
-        st.table(df)
-        st.success(f"조건에 맞는 종목 {len(results)}개를 찾았습니다.")
+def get_upbit_candles(market, unit):
+    """업비트 전용 데이터 수집 함수"""
+    if unit in ['month', 'week', 'day']:
+        url = f"https://api.upbit.com/v1/candles/{unit}s?market={market}&count=200"
     else:
-        st.warning("현재 매수 신호가 있는 종목이 없습니다.")
+        url = f"https://api.upbit.com/v1/candles/minutes/{unit}?market={market}&count=200"
+    res = requests.get(url).json()
+    df = pd.DataFrame(res).sort_values('timestamp')
+    return df['trade_price']
+
+def check_signal(close_series):
+    """공통 매수 신호 계산기"""
+    if len(close_series) < 20: return None
+    basis = close_series.rolling(window=20).mean()
+    std = close_series.rolling(window=20).std()
+    lower_band = basis - (std * 2) # 기본 볼린저 밴드 공식 적용
+    
+    curr, prev, lower = close_series.iloc[-1], close_series.iloc[-2], lower_band.iloc[-1]
+    if prev < lower and curr > lower:
+        return curr
+    return None
+
+# --- 분석 로직 시작 ---
+if start_button:
+    st.session_state.found_data = [] # 새로운 분석 시 기존 데이터 초기화
+    
+    if "업비트" in market:
+        markets = [m for m in requests.get("https://api.upbit.com/v1/market/all").json() if m['market'].startswith('KRW-')]
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        results_container = st.container()
+
+        for i, m in enumerate(markets):
+            prog = (i + 1) / len(markets)
+            progress_bar.progress(prog)
+            status_text.text(f"코인 분석 중: {i+1}/{len(markets)} ({m['korean_name']})")
+            try:
+                prices = get_upbit_candles(m['market'], time_map[timeframe])
+                price = check_signal(prices)
+                if price:
+                    with results_container:
+                        st.success(f"✅ **{m['korean_name']}** ({m['market']}) 포착! : {price:,.0f}원")
+                    st.session_state.found_data.append({"시간": datetime.now().strftime('%H:%M'), "종목": m['korean_name'], "현재가": price})
+                time.sleep(0.1) # Upbit API Rate Limit 방지
+            except: continue
+    else:
+        is_kr = "국내" in market
+        if is_kr:
+            df = fdr.StockListing('KRX')
+            tickers = [row['Code'] + ('.KS' if row['Market'] == 'KOSPI' else '.KQ') for _, row in df.iterrows()]
+        else:
+            df = pd.concat([fdr.StockListing('NASDAQ'), fdr.StockListing('NYSE')])
+            tickers = [t for t in df['Symbol'].dropna().unique().tolist() if t.isalpha()]
+
+        inter, per = yf_time_map[timeframe]
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        results_container = st.container()
+
+        for i, t in enumerate(tickers):
+            prog = (i + 1) / len(tickers)
+            progress_bar.progress(prog)
+            status_text.text(f"주식 분석 중: {i+1}/{len(tickers)} ({t})")
+            try:
+                data = yf.download(t, interval=inter, period=per, progress=False)
+                if len(data) < 20: continue
+                # Multi-index 대응 코드 수정
+                if isinstance(data.columns, pd.MultiIndex):
+                    close = data['Close'][t]
+                else:
+                    close = data['Close']
+                
+                price = check_signal(close)
+                if price:
+                    with results_container:
+                        st.success(f"✅ **{t}** 신호 발생! : {price:,.2f}")
+                    st.session_state.found_data.append({"시간": datetime.now().strftime('%H:%M'), "종목": t, "현재가": price})
+            except: continue
+
+# --- 결과 출력 및 다운로드 영역 ---
+if st.session_state.found_data:
+    st.divider()
+    st.subheader("📊 분석 결과 요약")
+    result_df = pd.DataFrame(st.session_state.found_data)
+    st.table(result_df)
+    
+    # 엑셀 다운로드 기능 개선 (메모리 버퍼 사용)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        result_df.to_excel(writer, index=False, sheet_name='Scan_Results')
+    
+    processed_data = output.getvalue()
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button(
+            label="📥 엑셀 파일로 저장 (.xlsx)",
+            data=processed_data,
+            file_name=f"scanner_{datetime.now().strftime('%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    with col2:
+        # 보조용 CSV 다운로드
+        csv_data = result_df.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            label="📥 CSV 파일로 저장 (.csv)",
+            data=csv_data,
+            file_name=f"scanner_{datetime.now().strftime('%m%d_%H%M')}.csv",
+            mime="text/csv"
+        )
+elif start_button:
+    st.warning("신호가 발견되지 않았습니다.")
