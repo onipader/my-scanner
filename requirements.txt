@@ -1,6 +1,6 @@
-streamlit==1.32.0
-pandas==2.1.4
-yfinance==0.2.37
-FinanceDataReader==0.9.60
-requests==2.31.0
-openpyxl==3.1.2
+streamlit
+finance-datareader
+yfinance
+pandas
+requests
+openpyxl
