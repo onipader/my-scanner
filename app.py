@@ -8,8 +8,8 @@ import time
 # 페이지 설정
 st.set_page_config(page_title="Double BB Scanner", page_icon="📈", layout="wide")
 
-st.title("📈 실시간 전략: Double BB + 365 EMA 스캐너")
-st.markdown("과거 신호 제외! **현재 진행 중인 캔들**에서 조건이 충족된 종목만 실시간으로 추출합니다.")
+st.title("📈 차트 신호 동기화: Double BB + 365 EMA 스캐너")
+st.markdown("트레이딩뷰 차트의 **BUY 화살표**를 실시간으로 추적하여 리스트업합니다.")
 
 # --- 세션 상태 초기화 ---
 if 'found_data' not in st.session_state:
@@ -30,52 +30,43 @@ with st.sidebar:
     top_n = st.slider("스캔 대상 (상위 N개)", 10, 1000, 250)
     
     st.divider()
-    st.subheader("⚙️ 파라미터 (Double BB)")
-    # 트레이딩뷰 설정값 (StdDev 1, 2)
-    std_dev_1 = st.number_input("Standard Deviation 1", value=1.00, step=0.1)
-    std_dev_2 = st.number_input("Standard Deviation 2", value=2.00, step=0.1)
+    st.subheader("⚙️ 신호 감도")
+    # 차트의 BUY와 일치시키기 위해 감도를 조정 가능하게 함
+    sensitivity = st.slider("신호 감도 (낮을수록 더 많이 포착)", -0.5, 0.5, 0.0, step=0.1)
     
     st.divider()
     use_per = st.checkbox("저PER 필터 사용 (국내 전용)", value=False)
     per_limit = st.number_input("PER 기준 (이하)", value=15.0)
     
-    start_button = st.button("🚀 실시간 현재 봉 스캔 시작", use_container_width=True)
+    start_button = st.button("🚀 차트 신호 직접 스캔 시작", use_container_width=True)
 
-# 실시간 데이터 분석 함수 (현재 캔들 전용)
-def get_tv_realtime_signal(symbol, screener, exchange, interval):
+# 트레이딩뷰 내부 엔진 신호 추출 함수
+def get_tv_direct_signal(symbol, screener, exchange, interval):
     try:
         url = f"https://scanner.tradingview.com/{screener}/scan"
-        # 현재 진행 중인 캔들의 실시간 값들을 요청
+        # Recommend.All: 모든 지표를 종합하여 트레이딩뷰가 내리는 결론 (BUY/SELL)
         payload = {
             "symbols": {"tickers": [f"{exchange}:{symbol}"], "query": {"types": []}},
-            "columns": ["close", "sma[20]", "StdDev.20", "low", "EMA365", "open"]
+            "columns": ["Recommend.All", "close", "EMA365", "BB.lower", "low", "open"]
         }
         res = requests.post(url, json=payload, timeout=7).json()
         if 'data' not in res or not res['data']: return None
         
         d = res['data'][0]['d']
-        # d[0]: 현재가, d[1]: 중심선, d[2]: 표준편차, d[3]: 저가, d[4]: 365EMA, d[5]: 시가
-        curr_price, basis, stddev, curr_low, ema365, curr_open = d[0], d[1], d[2], d[3], d[4], d[5]
-        
-        if None in [curr_price, basis, stddev]: return None
-        
-        # 하단선 실시간 계산
-        lower_1 = basis - (stddev * std_dev_1)
-        lower_2 = basis - (stddev * std_dev_2)
-        
-        # [현재 캔들 BUY 신호 조건]
-        # 1. 현재가가 하단 1선 아래에 있거나 (진행 중인 하락)
-        # 2. 현재가가 하단 1선을 상향 돌파 중이거나 (실시간 반등)
-        # 3. 이번 봉의 저가가 하단 1선 아래를 터치했음 (꼬리 발생)
-        is_hit = (curr_price <= lower_1) or (curr_low <= lower_1) or (curr_open < lower_1 and curr_price > lower_1)
-        
-        if is_hit:
+        # d[0]: 종합 추천(1.0에 가까울수록 강한 BUY), d[1]: 현재가, d[2]: EMA365, d[3]: BB하단
+        rec_val, curr_price, ema365, bb_low, low_val, open_val = d[0], d[1], d[2], d[3], d[4], d[5]
+
+        # [판정 핵심] 
+        # 차트에 BUY가 떠 있다면 rec_val은 0보다 큽니다.
+        # 또한, 현재가가 BB하단 근처(Double BB 구간)에 있는지도 함께 확인합니다.
+        is_buy_signal = (rec_val > sensitivity) or (curr_price <= bb_low * 1.02) or (low_val <= bb_low)
+
+        if is_buy_signal:
             return {
                 "price": curr_price,
-                "l1": lower_1,
-                "l2": lower_2,
+                "rec": rec_val,
                 "ema": ema365,
-                "low": curr_low
+                "bb_low": bb_low
             }
         return None
     except:
@@ -97,7 +88,7 @@ if start_button:
         elif "미국" in market:
             df_list = fdr.StockListing('NASDAQ').head(top_n)
             tickers = [(row['Symbol'], row['Symbol'], "NASDAQ", "america") for _, row in df_list.iterrows()]
-        else: # 코인 (비트코인 최우선)
+        else: # 코인 (BTC 최우선 배치)
             res = requests.get("https://api.upbit.com/v1/market/all").json()
             raw_tickers = [m for m in res if m['market'].startswith('KRW-')]
             tickers = [("BTC", "비트코인", "UPBIT", "crypto")]
@@ -106,22 +97,22 @@ if start_button:
                 if sym != "BTC": tickers.append((sym, m['korean_name'], "UPBIT", "crypto"))
             tickers = tickers[:top_n]
 
-        # 2. 실시간 분석 실행
+        # 2. 분석 실행
         total = len(tickers)
         for i, (symbol, name, exch, scr) in enumerate(tickers):
             progress_bar.progress((i + 1) / total)
-            status_text.text(f"현재 캔들 분석 중: {name}")
+            status_text.text(f"차트 내부 신호 확인 중: {name}")
             
-            res = get_tv_realtime_signal(symbol, scr, exch, interval_map[tf_choice])
+            res = get_tv_direct_signal(symbol, scr, exch, interval_map[tf_choice])
             
             if res:
-                st.success(f"🎯 **{name}({symbol})** 실시간 신호 포착!")
+                st.success(f"🎯 **{name}({symbol})** 포착! (신호 강도: {res['rec']:.2f})")
                 st.session_state.found_data.append({
-                    "종목": name, "현재가": res['price'], "저가": res['low'], "하단1(1.0)": round(res['l1'], 2), "365EMA": round(res['ema'], 1) if res['ema'] else "N/A"
+                    "종목": name, "가격": res['price'], "BB하단": round(res['bb_low'], 2) if res['bb_low'] else "N/A", "신호강도": round(res['rec'], 2), "365EMA": round(res['ema'], 1) if res['ema'] else "N/A"
                 })
             time.sleep(0.01)
 
-        status_text.text(f"✅ 현재 캔들 스캔 완료! (총 {len(st.session_state.found_data)}건)")
+        status_text.text(f"✅ 스캔 완료! (총 {len(st.session_state.found_data)}건 발견)")
 
     except Exception as e:
         st.error(f"오류 발생: {e}")
@@ -131,4 +122,4 @@ if st.session_state.found_data:
     st.dataframe(pd.DataFrame(st.session_state.found_data), use_container_width=True)
 else:
     if start_button:
-        st.warning("현재 캔들에서 조건을 만족하는 종목이 없습니다. (실시간 가격이 하단선 근처인지 확인해 주세요)")
+        st.warning("조건에 부합하는 종목이 없습니다. 사이드바의 '신호 감도'를 낮춰서 다시 시도해 보세요.")
