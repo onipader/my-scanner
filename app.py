@@ -11,7 +11,7 @@ import io
 st.set_page_config(page_title="글로벌 우량주 스캐너", page_icon="💰", layout="wide")
 
 st.title("💰 실시간 글로벌 우량주 & 저PER 스캐너")
-st.markdown("전 세계 주식과 코인을 분석합니다. **5분봉부터 월봉까지** 자유롭게 선택하세요.")
+st.markdown("전 세계 주식과 코인을 분석합니다. **5분봉부터 월봉까지** 지원합니다.")
 
 # --- 세션 상태 초기화 ---
 if 'found_data' not in st.session_state:
@@ -21,8 +21,6 @@ if 'found_data' not in st.session_state:
 with st.sidebar:
     st.header("🔍 검색 설정")
     market = st.selectbox("대상 선택", ["국내주식 (KOSPI/KOSDAQ)", "미국주식 (NASDAQ/NYSE)", "업비트 코인 (원화마켓)"])
-    
-    # --- 타임프레임 옵션 수정 ---
     timeframe = st.selectbox("타임프레임", ["5분봉", "1시간봉", "4시간봉", "일봉", "주봉", "월봉"])
     
     st.divider()
@@ -37,40 +35,38 @@ with st.sidebar:
     
     start_button = st.button("🚀 스캔 시작", use_container_width=True)
 
-# --- 시간 매핑 로직 (핵심 수정 사항) ---
-# 업비트용 매핑
-upbit_time_map = {
-    "5분봉": "5", "1시간봉": "60", "4시간봉": "240", 
-    "일봉": "days", "주봉": "weeks", "월봉": "months"
-}
-
-# yfinance용 매핑 (인터벌, 데이터 기간)
+# --- 시간 매핑 설정 ---
+upbit_time_map = {"5분봉": "5", "1시간봉": "60", "4시간봉": "240", "일봉": "days", "주봉": "weeks", "월봉": "months"}
 yf_time_map = {
-    "5분봉": ("5m", "1d"), 
-    "1시간봉": ("60m", "1w"), 
-    "4시간봉": ("4h", "1mo"), 
-    "일봉": ("1d", "2y"), 
-    "주봉": ("1wk", "5y"), 
-    "월봉": ("1mo", "max")
+    "5분봉": ("5m", "1d"), "1시간봉": ("60m", "1w"), "4시간봉": ("4h", "1mo"),
+    "일봉": ("1d", "2y"), "주봉": ("1wk", "5y"), "월봉": ("1mo", "max")
 }
 
 def calculate_rsi(series, period=14):
-    delta = series.diff()
-    up = delta.clip(lower=0); down = -1 * delta.clip(upper=0)
-    ema_up = up.ewm(com=period-1, adjust=False).mean()
-    ema_down = down.ewm(com=period-1, adjust=False).mean()
-    return 100 - (100 / (1 + (ema_up / (ema_down + 1e-10))))
+    try:
+        delta = series.diff()
+        up = delta.clip(lower=0); down = -1 * delta.clip(upper=0)
+        ema_up = up.ewm(com=period-1, adjust=False).mean()
+        ema_down = down.ewm(com=period-1, adjust=False).mean()
+        rs = ema_up / (ema_down + 1e-10)
+        return 100 - (100 / (1 + rs))
+    except: return pd.Series([50] * len(series))
 
 def check_signal(df):
-    if len(df) < 20: return None
+    if df is None or len(df) < 20: return None
     close = df['Close']
-    lower_band = close.rolling(20).mean() - (close.rolling(20).std() * 2)
+    
+    # 지표 계산
+    basis = close.rolling(window=20).mean()
+    std = close.rolling(window=20).std()
+    lower_band = basis - (std * 2)
     rsi = calculate_rsi(close)
-    ma200 = close.rolling(200).mean()
+    ma200 = close.rolling(window=200).mean()
     
     curr_p, prev_p = close.iloc[-1], close.iloc[-2]
     curr_low, curr_rsi = lower_band.iloc[-1], rsi.iloc[-1]
     
+    # 조건 검성
     is_bb_hit = (prev_p < curr_low) or (curr_p < curr_low)
     is_rsi_ok = curr_rsi <= rsi_threshold
     is_ma_ok = curr_p > ma200.iloc[-1] if use_ma200 and len(df) >= 200 else True
@@ -79,49 +75,47 @@ def check_signal(df):
         return {"price": curr_p, "rsi": curr_rsi}
     return None
 
-# --- 분석 시작 ---
+# --- 분석 로직 ---
 if start_button:
     st.session_state.found_data = []
     progress_bar = st.progress(0); status_text = st.empty()
     
     try:
         tickers = []
+        # 1. 리스트 확보
         if "국내" in market:
             df_list = fdr.StockListing('KRX')
             cap_col = next((c for c in ['MarCap', '시가총액'] if c in df_list.columns), None)
-            df_list[cap_col] = pd.to_numeric(df_list[cap_col], errors='coerce')
-            if use_per and 'PER' in df_list.columns:
-                df_list['PER'] = pd.to_numeric(df_list['PER'], errors='coerce')
-                df_list = df_list[(df_list['PER'] > 0) & (df_list['PER'] <= per_limit)]
-            df_list = df_list.sort_values(cap_col, ascending=False).head(int(top_n))
-            tickers = [(row['Code'] + ('.KS' if row['Market'] == 'KOSPI' else '.KQ'), row['Name'], row.get('PER', 'N/A')) for _, row in df_list.iterrows()]
+            if cap_col:
+                df_list[cap_col] = pd.to_numeric(df_list[cap_col], errors='coerce')
+                # PER 필터
+                if use_per and 'PER' in df_list.columns:
+                    df_list['PER'] = pd.to_numeric(df_list['PER'], errors='coerce')
+                    df_list = df_list[(df_list['PER'] > 0) & (df_list['PER'] <= per_limit)]
+                # 시총순 정렬 및 상위 N개 강제 슬라이싱
+                df_list = df_list.sort_values(cap_col, ascending=False).head(int(top_n))
+                tickers = [(row['Code'] + ('.KS' if row['Market'] == 'KOSPI' else '.KQ'), row['Name'], row.get('PER', 'N/A')) for _, row in df_list.iterrows()]
         
         elif "미국" in market:
             df_list = fdr.StockListing('NASDAQ').head(int(top_n))
             tickers = [(row['Symbol'], row['Symbol'], 'N/A') for _, row in df_list.iterrows()]
             
-        else: # 코인 (업비트)
+        else: # 업비트
             res = requests.get("https://api.upbit.com/v1/market/all").json()
-            raw_tickers = [m for m in res if m['market'].startswith('KRW-')]
-            tickers = [(m['market'], m['korean_name'], 'N/A') for m in raw_tickers[:int(top_n)]]
+            raw_coins = [m for m in res if m['market'].startswith('KRW-')]
+            tickers = [(m['market'], m['korean_name'], 'N/A') for m in raw_coins[:int(top_n)]]
 
         # 2. 개별 종목 분석
-        scan_count = len(tickers)
         for i, (symbol, name, per_val) in enumerate(tickers):
-            progress_bar.progress((i + 1) / scan_count)
-            status_text.text(f"분석 중: {name} ({i+1}/{scan_count})")
+            progress_bar.progress((i + 1) / len(tickers))
+            status_text.text(f"분석 중: {name} ({i+1}/{len(tickers)})")
             
             try:
                 if "업비트" in market:
                     unit = upbit_time_map[timeframe]
-                    if unit.isdigit(): # 분봉
-                        url = f"https://api.upbit.com/v1/candles/minutes/{unit}?market={symbol}&count=200"
-                    else: # 일/주/월봉
-                        url = f"https://api.upbit.com/v1/candles/{unit[:-1]}?market={symbol}&count=200"
-                    
-                    data_res = requests.get(url).json()
-                    df = pd.DataFrame(data_res).sort_values('timestamp')
-                    df = df.rename(columns={'trade_price': 'Close'})
+                    url = f"https://api.upbit.com/v1/candles/{'minutes/' if unit.isdigit() else ''}{unit[:-1] if not unit.isdigit() else unit}?market={symbol}&count=200"
+                    res = requests.get(url).json()
+                    df = pd.DataFrame(res).sort_values('timestamp').rename(columns={'trade_price': 'Close'})
                 else:
                     inter, per_str = yf_time_map[timeframe]
                     raw_data = yf.download(symbol, interval=inter, period=per_str, progress=False)
@@ -139,7 +133,7 @@ if start_button:
                     })
             except: continue
             
-        status_text.text(f"✅ {timeframe} 분석 완료!")
+        status_text.text(f"✅ {timeframe} 스캔 완료!")
 
     except Exception as e:
         st.error(f"오류 발생: {e}")
@@ -149,3 +143,5 @@ if st.session_state.found_data:
     st.divider()
     res_df = pd.DataFrame(st.session_state.found_data)
     st.dataframe(res_df, use_container_width=True)
+elif start_button:
+    st.warning("조건에 맞는 종목이 없습니다. 필터 기준을 조절해 보세요.")
