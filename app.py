@@ -22,6 +22,8 @@ with st.sidebar:
     st.header("🔍 검색 설정")
     market = st.selectbox("대상 선택", ["국내주식 (KOSPI/KOSDAQ)", "미국주식 (NASDAQ/NYSE)", "업비트 코인 (원화마켓)"])
     timeframe = st.selectbox("타임프레임", ["5분봉", "1시간봉", "4시간봉", "일봉", "주봉", "월봉"])
+    # 시총 순위 설정 추가
+    scan_limit = st.number_input("분석할 시총 순위 (최대 1000)", min_value=10, max_value=1000, value=500)
     start_button = st.button("🚀 분석 시작", use_container_width=True)
 
 # 4. 시간 매핑 설정
@@ -68,7 +70,6 @@ def check_signal(close_series):
 if start_button:
     st.session_state.found_data = []
     
-    # --- 코인 분석 ---
     if "업비트" in market:
         try:
             markets = [m for m in requests.get("https://api.upbit.com/v1/market/all").json() if m['market'].startswith('KRW-')]
@@ -92,34 +93,36 @@ if start_button:
         except Exception as e:
             st.error(f"업비트 데이터를 가져오는데 실패했습니다: {e}")
 
-    # --- 주식 분석 ---
     else:
         is_kr = "국내" in market
-        tickers = []
+        ticker_list = [] # (티커, 종목명) 튜플 리스트
         try:
             if is_kr:
+                # KRX 상장사 정보 가져오기 (시총 순 정렬됨)
                 df = fdr.StockListing('KRX')
-                tickers = [row['Code'] + ('.KS' if row['Market'] == 'KOSPI' else '.KQ') for _, row in df.iterrows()]
+                for _, row in df.head(scan_limit).iterrows():
+                    t = row['Code'] + ('.KS' if row['Market'] == 'KOSPI' else '.KQ')
+                    ticker_list.append((t, row['Name']))
             else:
                 df_nasdaq = fdr.StockListing('NASDAQ')
                 df_nyse = fdr.StockListing('NYSE')
                 df = pd.concat([df_nasdaq, df_nyse])
-                tickers = [t for t in df['Symbol'].dropna().unique().tolist() if str(t).isalpha()]
+                # 미국주식은 Symbol이 이름 역할을 하기도 함
+                for _, row in df.head(scan_limit).iterrows():
+                    ticker_list.append((row['Symbol'], row['Symbol']))
         except Exception as e:
-            st.error(f"거래소 서버 응답 지연으로 데이터를 불러올 수 없습니다. 잠시 후 다시 시도해주세요. (에러: {e})")
+            st.error(f"데이터를 불러오는 중 에러가 발생했습니다: {e}")
 
-        if tickers:
+        if ticker_list:
             inter, per = yf_time_map.get(timeframe, ("1d", "1y"))
             progress_bar = st.progress(0)
             status_text = st.empty()
             results_container = st.container()
 
-            # 주식은 종목수가 많아 상위 300개만 우선 스캔 (속도 최적화)
-            scan_limit = 300 
-            for i, t in enumerate(tickers[:scan_limit]):
-                prog = (i + 1) / scan_limit
+            for i, (t, name) in enumerate(ticker_list):
+                prog = (i + 1) / len(ticker_list)
                 progress_bar.progress(prog)
-                status_text.text(f"주식 분석 중: {i+1}/{scan_limit} ({t})")
+                status_text.text(f"주식 분석 중: {i+1}/{len(ticker_list)} ({name})")
                 try:
                     data = yf.download(t, interval=inter, period=per, progress=False)
                     if data.empty or len(data) < 20: continue
@@ -135,8 +138,8 @@ if start_button:
                     price = check_signal(close)
                     if price:
                         with results_container:
-                            st.success(f"✅ **{t}** 신호 발생! : {price:,.2f}")
-                        st.session_state.found_data.append({"시간": datetime.now().strftime('%H:%M'), "종목": t, "현재가": price})
+                            st.success(f"✅ **{name}** ({t}) 신호 발생! : {price:,.2f}")
+                        st.session_state.found_data.append({"시간": datetime.now().strftime('%H:%M'), "종목": name, "현재가": price, "코드": t})
                 except: continue
 
 # 6. 결과 출력 및 다운로드
@@ -157,5 +160,5 @@ if st.session_state.found_data:
     with col2:
         csv_data = result_df.to_csv(index=False).encode('utf-8-sig')
         st.download_button(label="📥 CSV 저장", data=csv_data, file_name="results.csv")
-elif 'start_button' in locals() and start_button:
+elif start_button:
     st.warning("신호가 발견되지 않았습니다.")
