@@ -7,6 +7,38 @@ import requests
 from datetime import datetime
 import io
 
+# ... (상단 import 및 설정 동일)
+
+# --- 분석 로직 시작 ---
+if start_button:
+    st.session_state.found_data = [] 
+    
+    if "업비트" in market:
+        # (코인 로직 동일)
+        pass
+    else:
+        is_kr = "국내" in market
+        try:
+            if is_kr:
+                # KRX 서버 장애 대비 예외 처리
+                df = fdr.StockListing('KRX')
+                tickers = [row['Code'] + ('.KS' if row['Market'] == 'KOSPI' else '.KQ') for _, row in df.iterrows()]
+            else:
+                df_nasdaq = fdr.StockListing('NASDAQ')
+                df_nyse = fdr.StockListing('NYSE')
+                df = pd.concat([df_nasdaq, df_nyse])
+                tickers = [t for t in df['Symbol'].dropna().unique().tolist() if str(t).isalpha()]
+        except Exception as e:
+            st.error(f"⚠️ 현재 {market} 데이터를 가져올 수 없습니다. 서버 상태를 확인해 주세요. (에러: {e})")
+            tickers = [] # 빈 리스트로 설정하여 아래 루프 방지
+
+        if tickers:
+            inter, per = yf_time_map.get(timeframe, ("1d", "1y"))
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            results_container = st.container()
+
+            # (이하 루프 로직 동일)
 # 페이지 설정
 st.set_page_config(page_title="글로벌 자산 스캐너", page_icon="💰", layout="wide")
 
