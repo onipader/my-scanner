@@ -21,12 +21,12 @@ if 'found_data' not in st.session_state:
 with st.sidebar:
     st.header("🔍 검색 설정")
     market = st.selectbox("대상 선택", ["국내주식 (KOSPI/KOSDAQ)", "미국주식 (NASDAQ/NYSE)", "업비트 코인 (원화마켓)"])
-    timeframe = st.selectbox("타임프레임", ["5분봉", "1시간봉", "일봉", "주봉", "월봉"])
+    timeframe = st.selectbox("타임프레임", ["5분봉", "1시간봉", "4시간봉", "일봉", "주봉", "월봉"])
     start_button = st.button("🚀 분석 시작", use_container_width=True)
 
 # 시간 매핑
-time_map = {"5분봉":"5", "1시간봉":"60", "일봉":"day", "주봉":"week", "월봉":"month"}
-yf_time_map = {"5분봉":("5m","1d"), "1시간봉":("60m","1w"), "일봉":("1d","1y"), "주봉":("1wk","2y"), "월봉":("1mo","5y")}
+time_map = {"5분봉":"5", "1시간봉":"60", "4시간봉":"240", "일봉":"day", "주봉":"week", "월봉":"month"}
+yf_time_map = {"5분봉":("5m","1d"), "1시간봉":("60m","1w"), "1시간봉":("240m","4w"), "일봉":("1d","1y"), "주봉":("1wk","2y"), "월봉":("1mo","5y")}
 
 def get_upbit_candles(market, unit):
     """업비트 전용 데이터 수집 함수"""
